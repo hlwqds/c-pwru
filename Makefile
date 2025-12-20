@@ -10,9 +10,11 @@ SRC_DIR := src
 BUILD_DIR := build
 LIBBPF_DIR := libbpf/src
 LIBBPF_OBJ := $(LIBBPF_DIR)/libbpf.a
+LIBBPF_HEADERS := $(BUILD_DIR)/libbpf_headers
 
 # In-tree libbpf includes
-INCLUDES := -I$(LIBBPF_DIR)/../../libbpf/include/uapi -I$(LIBBPF_DIR)/../../libbpf/include -I$(SRC_DIR)
+# We point to the directory where we install headers to get <bpf/libbpf.h> structure
+INCLUDES := -I$(LIBBPF_HEADERS)/usr/include -I$(SRC_DIR)
 
 # Dependencies (libbpf requires elf and z)
 LIBS := $(LIBBPF_OBJ) -lelf -lz
@@ -23,7 +25,7 @@ BPF_OBJ := $(BUILD_DIR)/pwru.bpf.o
 USER_SRC := $(SRC_DIR)/pwru.c
 USER_BIN := $(BUILD_DIR)/pwru
 
-.PHONY: all clean libbpf
+.PHONY: all clean libbpf_headers
 
 all: $(USER_BIN)
 
@@ -35,16 +37,21 @@ $(LIBBPF_OBJ):
 	@echo "  BUILD    libbpf"
 	@$(MAKE) -C $(LIBBPF_DIR) > /dev/null
 
+# Install libbpf headers to build dir for correct <bpf/xxx.h> inclusion
+$(LIBBPF_HEADERS):
+	@echo "  INSTALL  libbpf headers"
+	@$(MAKE) -C $(LIBBPF_DIR) install_headers DESTDIR=$(abspath $(LIBBPF_HEADERS)) > /dev/null
+
 # Compile eBPF program
 # Note: We use -I for local libbpf headers to ensure BPF helpers are found
-$(BPF_OBJ): $(BPF_SRC) | $(BUILD_DIR) $(LIBBPF_OBJ)
+$(BPF_OBJ): $(BPF_SRC) | $(BUILD_DIR) $(LIBBPF_HEADERS)
 	$(CLANG) -g -O2 -target bpf -D__TARGET_ARCH_$(ARCH) \
-		-I$(LIBBPF_DIR)/../../libbpf/include/uapi \
+		-I$(LIBBPF_HEADERS)/usr/include \
 		-I$(SRC_DIR) \
 		-c $(BPF_SRC) -o $(BPF_OBJ)
 
 # Compile User-space program
-$(USER_BIN): $(USER_SRC) $(BPF_OBJ) $(LIBBPF_OBJ) | $(BUILD_DIR)
+$(USER_BIN): $(USER_SRC) $(BPF_OBJ) $(LIBBPF_OBJ) | $(BUILD_DIR) $(LIBBPF_HEADERS)
 	$(CC) $(CFLAGS) $(USER_SRC) $(INCLUDES) -o $(USER_BIN) $(LIBS)
 
 clean:

@@ -87,6 +87,36 @@ Hardcoding IPs in C code is impractical. We implemented a `BPF_MAP_TYPE_ARRAY` t
 *   [x] **Parsing**: Extract IPv4 Src/Dst.
 *   [x] **Filtering**: CLI-based IP filtering.
 *   [x] **Output**: Efficient RingBuffer events.
+*   [x] **BTF Magic**: Automated discovery of 1000+ kernel functions.
+
+---
+
+## Phase 3: BTF Magic (Automation)
+
+The core "magic" of `pwru` is its ability to find every kernel function that processes a network packet. We implemented this by crawling the kernel's BTF (BPF Type Format) data.
+
+### 1. In-tree Libbpf Build
+To support advanced BTF APIs, we migrated from system-wide `libbpf` to a git submodule (`v1.6.2`).
+-   **Makefile**: Added logic to automatically build `libbpf.a` and install headers into a local `build/` directory. This ensures the project is portable and uses consistent API versions.
+
+### 2. BTF Traversal Logic
+Implemented `print_skb_funcs()` in `pwru.c` which performs the following:
+1.  **Load vmlinux BTF**: Loads the type information of the currently running kernel.
+2.  **Find `sk_buff`**: Locates the unique Type ID for `struct sk_buff`.
+3.  **Iterate Types**: Loops through every type defined in the kernel.
+4.  **Filter Functions**: 
+    -   Identify `BTF_KIND_FUNC` entries.
+    -   Resolve their `FUNC_PROTO` (prototype).
+    -   Check the **first parameter** (`params[0]`).
+    -   Verify if the parameter is a **Pointer** to the `sk_buff` ID.
+5.  **Result**: Successfully identified **1100+** functions in the local kernel that accept `skb` as their first argument.
+
+### 3. CLI Integration
+Added the `--list-funcs` flag to allow users to verify the discovered functions without running the full tracer.
+
+## Phase 4: Dynamic Attachment (Planned)
+The next step is to programmatically attach our kprobe to the entire list of discovered functions.
+
 
 ## How to Run
 ```bash

@@ -7,6 +7,7 @@
 #include <arpa/inet.h>
 #include <bpf/libbpf.h>
 #include <bpf/bpf.h>
+#include <bpf/btf.h>
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format, va_list args)
 {
@@ -25,6 +26,7 @@ static void sig_handler(int sig)
 struct config {
     __u32 filter_src_ip;
     __u32 filter_dst_ip;
+    bool list_funcs;
 };
 
 struct event {
@@ -49,6 +51,86 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	return 0;
 }
 
+// Helper: skip CONST/VOLATILE/RESTRICT/TYPEDEF modifiers
+static __u32 btf_resolve_type(struct btf *btf, __u32 type_id)
+{
+    const struct btf_type *t;
+    while (true) {
+        t = btf__type_by_id(btf, type_id);
+        if (!t) return 0;
+        if (!btf_is_mod(t) && !btf_is_typedef(t))
+            break;
+        type_id = t->type;
+    }
+    return type_id;
+}
+
+static bool is_skb_func(struct btf *btf, const struct btf_type *func, __s32 skb_id)
+{
+    const struct btf_type *proto;
+    const struct btf_param *param;
+    __u32 type_id;
+
+    if (!btf_is_func(func)) return false;
+
+    // Get the function prototype
+    proto = btf__type_by_id(btf, func->type);
+    if (!proto || !btf_is_func_proto(proto)) return false;
+
+    // We only care if it has at least one argument
+    if (btf_vlen(proto) == 0) return false;
+
+    // Check first argument
+    param = btf_params(proto);
+    type_id = param->type;
+
+    // Arg0 must be a POINTER
+    type_id = btf_resolve_type(btf, type_id);
+    const struct btf_type *t = btf__type_by_id(btf, type_id);
+    if (!t || !btf_is_ptr(t)) return false;
+
+    // De-reference pointer and resolve modifiers to find the struct
+    type_id = btf_resolve_type(btf, t->type);
+    
+    // Check if it matches sk_buff ID
+    return type_id == skb_id;
+}
+
+static int print_skb_funcs()
+{
+    struct btf *btf;
+    __s32 skb_id;
+    int count = 0;
+
+    btf = btf__load_vmlinux_btf();
+    if (!btf) {
+        fprintf(stderr, "Failed to load vmlinux BTF\n");
+        return -1;
+    }
+
+    skb_id = btf__find_by_name_kind(btf, "sk_buff", BTF_KIND_STRUCT);
+    if (skb_id < 0) {
+        fprintf(stderr, "Failed to find 'struct sk_buff' in BTF\n");
+        btf__free(btf);
+        return -1;
+    }
+
+    int nr_types = btf__type_cnt(btf);
+    for (int i = 1; i <= nr_types; i++) {
+        const struct btf_type *t = btf__type_by_id(btf, i);
+        if (!t || !btf_is_func(t)) continue;
+
+        if (is_skb_func(btf, t, skb_id)) {
+            printf("%s\n", btf__name_by_offset(btf, t->name_off));
+            count++;
+        }
+    }
+
+    fprintf(stderr, "Found %d functions with 'struct sk_buff *' as first argument.\n", count);
+    btf__free(btf);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
 	struct bpf_object *obj;
@@ -67,8 +149,14 @@ int main(int argc, char **argv)
 			inet_pton(AF_INET, argv[++i], &cfg.filter_src_ip);
 		} else if (strcmp(argv[i], "--dst-ip") == 0 && i + 1 < argc) {
 			inet_pton(AF_INET, argv[++i], &cfg.filter_dst_ip);
-		}
+		} else if (strcmp(argv[i], "--list-funcs") == 0) {
+            cfg.list_funcs = true;
+        }
 	}
+
+    if (cfg.list_funcs) {
+        return print_skb_funcs();
+    }
 
 	libbpf_set_print(libbpf_print_fn);
 
