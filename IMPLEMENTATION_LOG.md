@@ -90,6 +90,7 @@ Hardcoding IPs in C code is impractical. We implemented a `BPF_MAP_TYPE_ARRAY` t
 *   [x] **BTF Magic**: Automated discovery of 1000+ kernel functions.
 *   [x] **Phase 4**: Dynamic Mass Attachment (1100+ kprobes).
 *   [x] **Phase 4.5**: Kprobe Whitelist Filtering (Optimized startup).
+*   [ ] **Phase 5**: Stack trace, symbol resolution, and performance optimization.
 
 ---
 
@@ -97,23 +98,36 @@ Hardcoding IPs in C code is impractical. We implemented a `BPF_MAP_TYPE_ARRAY` t
 (details...)
 
 ## Phase 4: Dynamic Mass Attachment
+(details...)
 
-With the function list from Phase 3, we implemented the logic to attach kprobes to **all** identified functions.
+## Phase 5: Symbol Resolution & Debugging (In Progress)
 
-### 1. Implementation
--   **Refactoring**: Split `get_skb_funcs` to populate a `struct func_list`.
--   **Whitelist Optimization**: Before attaching, we now filter functions against `/sys/kernel/tracing/available_filter_functions`. This eliminates 99% of attachment errors and drastically speeds up startup.
--   **Mass Attach Loop**: Iterate through the filtered list and call `bpf_program__attach_kprobe` for each function.
--   **Error Handling**: Gracefully handle attachment failures.
--   **Resource Management**: Maintain an array of `bpf_link` pointers.
+### 1. Symbol Resolution
+We implemented the logic to map kernel addresses back to function names:
+-   **Kernel**: Capture `PT_REGS_IP(ctx)` in the BPF program.
+-   **User**: Parse `/proc/kallsyms` into a sorted array and use binary search to resolve names.
 
-### 2. Results
--   Successfully attached to **1000+** traceable functions.
--   Startup is now silent (no error spam) and fast.
+### 2. The "0 Events" Mystery
+When running with `--all-kprobes`, we initially saw 0 events in the output, despite successfully attaching to 1000+ functions.
 
-## Phase 5: Polish & Performance (Planned)
--   Resolve function addresses to symbols (ksyms) to see *where* the packet is.
--   Improve output formatting.
+**Debugging Steps:**
+1.  **Trace Pipe**: Enabled `bpf_printk` and confirmed that probes **are triggering**.
+    -   `Enter: ffffffff...` logs appear.
+    -   `skb: ffff...` logs appear.
+2.  **Invalid SKB Context**:
+    -   Some functions (e.g., `ffffffffb8aa9091`) return `head: 0` when reading `skb->head` via `BPF_CORE_READ`.
+    -   This suggests either an invalid `skb` pointer or an issue with `PT_REGS_PARM1` context in specific kprobes.
+3.  **Valid Packets Found**:
+    -   Other functions (e.g., `ffffffffb8ab4fd1`) show **valid head pointers** (`head: ffff...`).
+    -   This proves that valid packets are being intercepted.
+4.  **Permissive Mode**:
+    -   Modified BPF program to submit events even if IP parsing fails (defaulting to 0.0.0.0).
+    -   Investigating why these events are not appearing in RingBuffer user-space consumption.
+
+### Next Steps
+-   Investigate RingBuffer submission path.
+-   Verify `PT_REGS_PARM1` correctness for all attached functions.
+-   Refine packet parsing logic to handle non-IP packets gracefully.
 
 ## How to Run
 ```bash
