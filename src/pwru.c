@@ -55,9 +55,49 @@ static int add_func(struct func_list *fl, const char *name)
 	return 0;
 }
 
+static int compare_strs(const void *a, const void *b)
+{
+	const char *const *pa = a;
+	const char *const *pb = b;
+	return strcmp(*pa, *pb);
+}
+
+static int load_available_funcs(struct func_list *fl)
+{
+	FILE *f;
+	char line[256];
+	char *p;
+
+	// Try standard locations
+	f = fopen("/sys/kernel/tracing/available_filter_functions", "r");
+	if (!f)
+		f = fopen(
+		    "/sys/kernel/debug/tracing/available_filter_functions",
+		    "r");
+	if (!f)
+		return -1;
+
+	while (fgets(line, sizeof(line), f)) {
+		// Format: "function_name" or "function_name [module]" or
+		// "function_name\t..."
+		p = strpbrk(line, " \t\n\r");
+		if (p)
+			*p = '\0';
+
+		if (strlen(line) > 0) {
+			add_func(fl, line);
+		}
+	}
+	fclose(f);
+
+	qsort(fl->names, fl->count, sizeof(char *), compare_strs);
+	return 0;
+}
+
 struct event {
 	__u64 skb_addr;
 	__u32 src_ip;
+
 	__u32 dst_ip;
 	__u32 pid;
 	char comm[16];
@@ -129,41 +169,110 @@ static bool is_skb_func(struct btf *btf, const struct btf_type *func,
 }
 
 static int get_skb_funcs(struct func_list *fl)
+
 {
+
 	struct btf *btf;
+
 	__s32 skb_id;
 
+	struct func_list available = {0};
+
+	int i;
+
+	// Load whitelist
+
+	if (load_available_funcs(&available) < 0) {
+
+		fprintf(stderr,
+			"Warning: failed to load available_filter_functions. "
+			"Trying blindly...\n");
+	}
+
 	btf = btf__load_vmlinux_btf();
+
 	if (!btf) {
+
 		fprintf(stderr, "Failed to load vmlinux BTF\n");
+
+		// Clean up available
+
+		for (i = 0; i < available.count; i++)
+			free(available.names[i]);
+
+		free(available.names);
+
 		return -1;
 	}
 
 	skb_id = btf__find_by_name_kind(btf, "sk_buff", BTF_KIND_STRUCT);
+
 	if (skb_id < 0) {
+
 		fprintf(stderr, "Failed to find 'struct sk_buff' in BTF\n");
+
 		btf__free(btf);
+
+		// Clean up available
+
+		for (i = 0; i < available.count; i++)
+			free(available.names[i]);
+
+		free(available.names);
+
 		return -1;
 	}
 
 	int nr_types = btf__type_cnt(btf);
-	for (int i = 1; i <= nr_types; i++) {
+
+	for (i = 1; i <= nr_types; i++) {
+
 		const struct btf_type *t = btf__type_by_id(btf, i);
+
 		if (!t || !btf_is_func(t))
 			continue;
 
 		if (is_skb_func(btf, t, skb_id)) {
-			if (add_func(fl, btf__name_by_offset(
-					     btf, t->name_off)) < 0) {
+
+			const char *name =
+			    btf__name_by_offset(btf, t->name_off);
+
+			// Filter against whitelist
+
+			if (available.count > 0) {
+
+				if (!bsearch(&name, available.names,
+					     available.count, sizeof(char *),
+					     compare_strs)) {
+
+					continue;
+				}
+			}
+
+			if (add_func(fl, name) < 0) {
+
 				fprintf(stderr,
 					"Failed to add function name\n");
+
 				btf__free(btf);
+
+				for (i = 0; i < available.count; i++)
+					free(available.names[i]);
+
+				free(available.names);
+
 				return -1;
 			}
 		}
 	}
 
 	btf__free(btf);
+
+	for (i = 0; i < available.count; i++)
+		free(available.names[i]);
+
+	free(available.names);
+
 	return 0;
 }
 

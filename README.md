@@ -14,9 +14,9 @@ This project is heavily inspired by and based on the logic of **[cilium/pwru](ht
 
 - [x] Phase 1: Environment setup and basic `sk_buff` tracking via `kprobe/ip_rcv`.
 - [x] Phase 2: Deep packet parsing (IPv4) and dynamic filtering via BPF Maps & RingBuffer.
-- [ ] Phase 3: BTF-based automatic function discovery.
-- [ ] Phase 4: Dynamic multi-kprobe attachment.
-- [ ] Phase 5: Stack trace and performance optimization.
+- [x] Phase 3: BTF-based automatic function discovery.
+- [x] Phase 4: Dynamic mass kprobe attachment (optimized with kprobe whitelist).
+- [ ] Phase 5: Stack trace, symbol resolution, and performance optimization.
 
 ## License
 
