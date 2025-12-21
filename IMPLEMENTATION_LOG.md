@@ -126,21 +126,95 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
     -   更新输出以显示 `Proto: TCP/UDP` 和端口信息（如 `1.2.3.4:80`）。
 
 ### 6. PID 过滤与错误处理
+
 增加了按进程 ID (TGID) 过滤的功能，并对堆栈捕获失败进行显式报告。
+
 -   **内核态**：在配置 Map 中加入 `filter_pid` 并应用于 `kprobe_ip_rcv`。
+
 -   **用户态**：
+
     -   增加 `--pid <id>` 参数。
+
     -   更新 `handle_event` 以检查负值的 `stack_id`（错误码）。
+
     -   特别处理 `-EEXIST` 以报告 "[Stack truncated: map size limit reached]"。
 
-## 第六阶段：性能优化（计划中）
 
-我们的目标是通过研究 `fentry` 来降低大规模追踪的开销。
-详见 [docs/kprobe_vs_fentry.md](docs/kprobe_vs_fentry.md) 了解详细对比。
+
+## 第六阶段：性能优化 (fentry)（已完成）
+
+
+
+实现了对 `fentry` (BPF Trampoline) 的支持，大幅降低了追踪开销。
+
+
+
+### 1. 混合后端架构
+
+-   **内核态**：重构了 `pwru.bpf.c`，将核心逻辑提取为 `static inline` 函数 `handle_packet`。
+
+    -   `kprobe/ip_rcv`：继续使用 `PT_REGS_IP(ctx)` 获取 IP。
+
+    -   `fentry/ip_rcv`：新增挂载点，使用 `bpf_get_func_ip(ctx)` 获取 IP。
+
+-   **用户态**：
+
+    -   增加了 `--backend <kprobe|fentry>` 参数。
+
+    -   实现了自动检测：如果存在 `/sys/kernel/btf/vmlinux`，默认使用 `fentry`，否则回退到 `kprobe`。
+
+
+
+### 2. 动态 fentry 挂载
+
+与 kprobe 不同，`fentry` 的多点挂载机制有所差异：
+
+-   **BTF ID 获取**：更新了 `get_skb_funcs`，在扫描函数名时同时记录其 BTF ID。
+
+-   **低级 API 使用**：使用 `bpf_link_create` 直接创建 `BPF_TRACE_FENTRY` 类型的链接，指定 `target_btf_id`。这允许我们将同一个 BPF 程序实例挂载到数千个不同的内核函数上。
+
+-   **资源管理**：实现了针对 `fentry` 文件描述符 (FD) 的独立管理与清理逻辑。
+
+
+
+## 当前状态
+
+*   [x] **挂载**：`ip_rcv` 的静态挂载。
+
+*   [x] **解析**：提取 IPv4 源/目的地址。
+
+*   [x] **过滤**：基于 CLI 的 IP 过滤。
+
+*   [x] **输出**：高效的 RingBuffer 事件传输。
+
+*   [x] **BTF 魔法**：自动发现 1000+ 个内核函数。
+
+*   [x] **第四阶段**：动态大规模挂载 (1100+ kprobes)。
+
+*   [x] **第四.五阶段**：Kprobe 白名单过滤（优化启动速度） 。
+
+*   [x] **第五阶段**：堆栈追踪、符号解析、L4/PID 过滤。
+
+*   [x] **第六阶段**：性能优化 (fentry)。
+
+
 
 ## 如何运行
+
 ```bash
+
 cd c-pwru
+
 make
+
+# 自动选择最佳后端（优先 fentry）
+
 sudo ./build/pwru --proto tcp --dport 80
+
+
+
+# 强制使用 kprobe
+
+sudo ./build/pwru --backend kprobe --dst-ip 1.1.1.1
+
 ```

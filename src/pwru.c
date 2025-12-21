@@ -25,6 +25,12 @@ static void sig_handler(int sig)
 	exiting = true;
 }
 
+enum backend {
+	BACKEND_AUTO,
+	BACKEND_KPROBE,
+	BACKEND_FENTRY,
+};
+
 struct config {
 	__u32 filter_src_ip;
 	__u32 filter_dst_ip;
@@ -34,25 +40,33 @@ struct config {
 	__u32 filter_pid;
 	bool list_funcs;
 	bool all_kprobes;
+	enum backend backend;
 };
 
 struct func_list {
 	char **names;
+	__s32 *ids; // BTF IDs
 	int count;
 	int capacity;
 };
 
-static int add_func(struct func_list *fl, const char *name)
+static int add_func(struct func_list *fl, const char *name, __s32 id)
 {
 	if (fl->count == fl->capacity) {
 		int new_cap = fl->capacity == 0 ? 128 : fl->capacity * 2;
 		char **new_names = realloc(fl->names, new_cap * sizeof(char *));
-		if (!new_names)
+		__s32 *new_ids = realloc(fl->ids, new_cap * sizeof(__s32));
+		if (!new_names || !new_ids) {
+			free(new_names);
+			free(new_ids);
 			return -1;
+		}
 		fl->names = new_names;
+		fl->ids = new_ids;
 		fl->capacity = new_cap;
 	}
 	fl->names[fl->count] = strdup(name);
+	fl->ids[fl->count] = id;
 	if (!fl->names[fl->count])
 		return -1;
 	fl->count++;
@@ -89,7 +103,7 @@ static int load_available_funcs(struct func_list *fl)
 			*p = '\0';
 
 		if (strlen(line) > 0) {
-			add_func(fl, line);
+			add_func(fl, line, 0);
 		}
 	}
 	fclose(f);
@@ -328,6 +342,7 @@ static int get_skb_funcs(struct func_list *fl)
 			free(available.names[i]);
 
 		free(available.names);
+		free(available.ids);
 
 		return -1;
 	}
@@ -346,6 +361,7 @@ static int get_skb_funcs(struct func_list *fl)
 			free(available.names[i]);
 
 		free(available.names);
+		free(available.ids);
 
 		return -1;
 	}
@@ -376,7 +392,7 @@ static int get_skb_funcs(struct func_list *fl)
 				}
 			}
 
-			if (add_func(fl, name) < 0) {
+			if (add_func(fl, name, i) < 0) {
 
 				fprintf(stderr,
 					"Failed to add function name\n");
@@ -387,6 +403,7 @@ static int get_skb_funcs(struct func_list *fl)
 					free(available.names[i]);
 
 				free(available.names);
+				free(available.ids);
 
 				return -1;
 			}
@@ -399,6 +416,7 @@ static int get_skb_funcs(struct func_list *fl)
 		free(available.names[i]);
 
 	free(available.names);
+	free(available.ids);
 
 	return 0;
 }
@@ -406,7 +424,7 @@ static int get_skb_funcs(struct func_list *fl)
 int main(int argc, char **argv)
 {
 	struct bpf_object *obj;
-	struct bpf_program *prog;
+	struct bpf_program *prog_kprobe = NULL, *prog_fentry = NULL;
 	struct bpf_link *link = NULL;
 	struct bpf_map *map_cfg, *map_rb, *map_stack;
 	struct ring_buffer *rb = NULL;
@@ -418,7 +436,10 @@ int main(int argc, char **argv)
 
 	// For mass attachment
 	struct bpf_link **links = NULL;
+	int *fentry_fds = NULL;
 	int link_count = 0;
+	int total_funcs = 0;
+
 	// Simple arg parsing
 	for (i = 1; i < argc; i++) {
 		if (strcmp(argv[i], "--src-ip") == 0 && i + 1 < argc) {
@@ -447,6 +468,19 @@ int main(int argc, char **argv)
 			cfg.list_funcs = true;
 		} else if (strcmp(argv[i], "--all-kprobes") == 0) {
 			cfg.all_kprobes = true;
+		} else if (strcmp(argv[i], "--backend") == 0 && i + 1 < argc) {
+			if (strcmp(argv[i + 1], "kprobe") == 0)
+				cfg.backend = BACKEND_KPROBE;
+			else if (strcmp(argv[i + 1], "fentry") == 0)
+				cfg.backend = BACKEND_FENTRY;
+			else {
+				fprintf(stderr,
+					"Invalid backend: %s. Use kprobe or "
+					"fentry.\n",
+					argv[i + 1]);
+				return 1;
+			}
+			i++;
 		}
 	}
 
@@ -460,7 +494,23 @@ int main(int argc, char **argv)
 			free(fl.names[i]);
 		}
 		free(fl.names);
+		free(fl.ids);
 		return 0;
+	}
+
+	// Auto-detect backend if not specified
+	if (cfg.backend == BACKEND_AUTO) {
+		if (access("/sys/kernel/btf/vmlinux", F_OK) == 0) {
+			cfg.backend = BACKEND_FENTRY;
+			printf("Backend: fentry (auto-detected)\n");
+		} else {
+			cfg.backend = BACKEND_KPROBE;
+			printf("Backend: kprobe (vmlinux BTF not found)\n");
+		}
+	} else {
+		printf("Backend: %s\n", cfg.backend == BACKEND_FENTRY
+					    ? "fentry"
+					    : "kprobe");
 	}
 
 	printf("Loading kallsyms...\n");
@@ -479,6 +529,18 @@ int main(int argc, char **argv)
 	if (libbpf_get_error(obj)) {
 		fprintf(stderr, "ERROR: opening BPF object file failed\n");
 		return 1;
+	}
+
+	// Disable programs we don't need based on backend
+	prog_kprobe = bpf_object__find_program_by_name(obj, "kprobe_ip_rcv");
+	prog_fentry = bpf_object__find_program_by_name(obj, "fentry_ip_rcv");
+
+	if (cfg.backend == BACKEND_KPROBE) {
+		if (prog_fentry)
+			bpf_program__set_autoload(prog_fentry, false);
+	} else {
+		if (prog_kprobe)
+			bpf_program__set_autoload(prog_kprobe, false);
 	}
 
 	printf("Loading BPF object...\n");
@@ -509,11 +571,6 @@ int main(int argc, char **argv)
 	}
 
 	printf("Attaching BPF programs...\n");
-	prog = bpf_object__find_program_by_name(obj, "kprobe_ip_rcv");
-	if (!prog) {
-		fprintf(stderr, "ERROR: finding program failed\n");
-		goto cleanup;
-	}
 
 	if (cfg.all_kprobes) {
 		struct func_list fl = {0};
@@ -522,30 +579,52 @@ int main(int argc, char **argv)
 			goto cleanup;
 
 		printf("Found %d functions. Attaching...\n", fl.count);
+		total_funcs = fl.count;
 
-		links = calloc(fl.count, sizeof(struct bpf_link *));
+		if (cfg.backend == BACKEND_KPROBE) {
+			links = calloc(fl.count, sizeof(struct bpf_link *));
+		} else {
+			fentry_fds = calloc(fl.count, sizeof(int));
+		}
 
 		for (i = 0; i < fl.count; i++) {
-			links[i] = bpf_program__attach_kprobe(prog, false,
-							      fl.names[i]);
-			if (libbpf_get_error(links[i])) {
-				// It's normal for some kprobes to fail
-				// (inlined, blacklist, etc) fprintf(stderr,
-				// "Failed to attach to %%s: %%ld\n",
-				// fl.names[i], libbpf_get_error(links[i]));
-				links[i] = NULL;
+			if (cfg.backend == BACKEND_KPROBE) {
+				links[i] = bpf_program__attach_kprobe(
+				    prog_kprobe, false, fl.names[i]);
+				if (libbpf_get_error(links[i])) {
+					links[i] = NULL;
+				} else {
+					link_count++;
+				}
 			} else {
-				link_count++;
+				// fentry attachment
+				int prog_fd = bpf_program__fd(prog_fentry);
+				LIBBPF_OPTS(bpf_link_create_opts, opts);
+				opts.target_btf_id = fl.ids[i];
+				int fd = bpf_link_create(
+				    prog_fd, 0, BPF_TRACE_FENTRY, &opts);
+				if (fd < 0) {
+					fentry_fds[i] = -1;
+				} else {
+					fentry_fds[i] = fd;
+					link_count++;
+				}
 			}
+
 			free(fl.names[i]); // We don't need the name anymore
 		}
 		free(fl.names);
+		free(fl.ids);
 		printf("Successfully attached to %d / %d functions.\n",
 		       link_count, fl.count);
 
 	} else {
 		// Default: just attach to ip_rcv
-		link = bpf_program__attach(prog);
+		if (cfg.backend == BACKEND_KPROBE)
+			link = bpf_program__attach(prog_kprobe);
+		else
+			link = bpf_program__attach(prog_fentry);
+
 		if (libbpf_get_error(link)) {
 			fprintf(stderr,
 				"ERROR: attaching program failed: %ld\n",
@@ -591,9 +670,19 @@ cleanup:
 		ring_buffer__free(rb);
 	if (link)
 		bpf_link__destroy(link);
+	if (links) {
+		for (i = 0; i < total_funcs; i++)
+			if (links[i])
+				bpf_link__destroy(links[i]);
+		free(links);
+	}
+	if (fentry_fds) {
+		for (i = 0; i < total_funcs; i++)
+			if (fentry_fds[i] > 0)
+				close(fentry_fds[i]);
+		free(fentry_fds);
+	}
 	if (obj)
 		bpf_object__close(obj);
-	if (links)
-		free(links);
 	return 0;
 }

@@ -51,18 +51,17 @@ struct {
 
 SEC("kprobe/ip_rcv")
 
-int kprobe_ip_rcv(struct pt_regs *ctx)
+static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
+					 __u64 ip)
 {
-	// bpf_printk("Enter: %llx\n", PT_REGS_IP(ctx));
-	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
+	struct config *cfg;
+	__u32 key = 0;
 	struct iphdr iph;
 	unsigned char *head;
 	__u16 network_header;
-	struct config *cfg;
-	__u32 key = 0;
+
 	cfg = bpf_map_lookup_elem(&config_map, &key);
 	if (!cfg) {
-		bpf_printk("Lookup failed\n");
 		return 0;
 	}
 	if (!skb)
@@ -72,12 +71,11 @@ int kprobe_ip_rcv(struct pt_regs *ctx)
 
 	e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
 	if (!e) {
-		bpf_printk("RB reserve failed\n");
 		return 0;
 	}
 
 	e->skb_addr = (__u64)skb;
-	e->addr = PT_REGS_IP(ctx);
+	e->addr = ip;
 	e->pid = bpf_get_current_pid_tgid() >> 32;
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->protocol = BPF_CORE_READ(skb, protocol);
@@ -163,6 +161,17 @@ int kprobe_ip_rcv(struct pt_regs *ctx)
 	}
 
 	bpf_ringbuf_submit(e, 0);
-	// bpf_printk("Submitted\n");
 	return 0;
+}
+
+int kprobe_ip_rcv(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
+
+SEC("fentry/ip_rcv")
+int BPF_PROG(fentry_ip_rcv, struct sk_buff *skb)
+{
+	return handle_packet(ctx, skb, bpf_get_func_ip(ctx));
 }
