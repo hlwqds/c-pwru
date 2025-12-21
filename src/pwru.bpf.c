@@ -49,8 +49,6 @@ struct {
 	__uint(max_entries, 1024);
 } stack_map SEC(".maps");
 
-SEC("kprobe/ip_rcv")
-
 static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 					 __u64 ip)
 {
@@ -164,6 +162,7 @@ static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 	return 0;
 }
 
+SEC("kprobe/ip_rcv")
 int kprobe_ip_rcv(struct pt_regs *ctx)
 {
 	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
