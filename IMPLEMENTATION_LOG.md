@@ -91,63 +91,12 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 *   [x] **第四阶段**：动态大规模挂载 (1100+ kprobes)。
 *   [x] **第四.五阶段**：Kprobe 白名单过滤（优化启动速度）。
 *   [x] **第五阶段**：堆栈追踪、符号解析、L4/PID 过滤。
-*   [ ] **第六阶段**：性能优化 (fentry)。
-
-## 第五阶段：符号解析与调试（已完成）
-
-### 1. 符号解析
-实现了将内核地址映射回函数名的逻辑：
--   **内核态**：在 BPF 程序中捕获 `PT_REGS_IP(ctx)`。
--   **用户态**：将 `/proc/kallsyms` 解析为有序数组，并使用二分查找解析名称。
-
-### 2. “0 事件”之谜（已解决）
-（详见代码实现...）
-
-### 3. 数据包协议识别
-为了更好地处理非 IP 数据包（或解析失败的情况），我们增加了从 `skb` 提取 `protocol` 的逻辑。
--   **内核态**：读取 `skb->protocol`。
--   **用户态**：在事件日志中打印协议（例如 IPv4 显示为 `Proto: 0x800`）。
-
-### 4. 堆栈追踪 (Stack Traces)
-增加了调用栈捕获，为每个事件提供上下文信息。
--   **Map**: `stack_map` (`BPF_MAP_TYPE_STACK_TRACE`)。
--   **内核态**：使用 `bpf_get_stackid(ctx, &stack_map, 0)` 捕获堆栈 ID。
--   **用户态**：将堆栈 ID 解析为 IP 地址数组，再通过 `find_ksym` 将 IP 解析为符号。
-
-### 5. L4 过滤（端口与协议）
-实现了传输层 (L4) 属性的解析与过滤。
--   **内核态**：
-    -   读取 `iph.protocol`。
-    -   根据协议解析 `tcphdr` 或 `udphdr` 以提取源/目的端口。
-    -   应用过滤器：`filter_proto`, `filter_sport`, `filter_dport`。
--   **用户态**：
-    -   增加 CLI 参数：`--proto`, `--sport`, `--dport`, `--port`。
-    -   更新 `struct config` 以将这些过滤器传递给 BPF。
-    -   更新输出以显示 `Proto: TCP/UDP` 和端口信息（如 `1.2.3.4:80`）。
-
-### 6. PID 过滤与错误处理
-
-增加了按进程 ID (TGID) 过滤的功能，并对堆栈捕获失败进行显式报告。
-
--   **内核态**：在配置 Map 中加入 `filter_pid` 并应用于 `kprobe_ip_rcv`。
-
--   **用户态**：
-
-    -   增加 `--pid <id>` 参数。
-
-    -   更新 `handle_event` 以检查负值的 `stack_id`（错误码）。
-
-    -   特别处理 `-EEXIST` 以报告 "[Stack truncated: map size limit reached]"。
-
-
+*   [x] **第六阶段**：性能优化 (fentry)。
+*   [ ] **第七阶段**：高级大规模挂载 (kprobe_multi & groups)。
 
 ## 第六阶段：性能优化 (fentry)（已完成）
 
-
-
 实现了对 `fentry` (BPF Trampoline) 的支持，大幅降低了追踪开销。
-
-
 
 ### 1. 混合后端架构
 
@@ -175,7 +124,23 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 
 -   **资源管理**：实现了针对 `fentry` 文件描述符 (FD) 的独立管理与清理逻辑。
 
+## 第七阶段：高级大规模挂载 (kprobe_multi)（计划中）
 
+为了进一步解决传统 kprobe 启动慢（在大规模模式下）以及 fentry 签名匹配严格的问题，计划引入 **Kprobe Multi (KPM)**。
+
+### 目标
+实现类似于原版 `pwru` 的分组挂载策略，利用 Linux 5.17+ 的 `BPF_TRACE_KPROBE_MULTI` 特性，实现毫秒级的千点挂载。
+
+### 实现计划
+1.  **参数分组 (Kprobe Groups)**：
+    *   利用 BTF 扫描所有内核函数。
+    *   根据 `struct sk_buff *` 参数出现的位置（第1、2、3、4或5个参数）将函数分为 5 个组。
+2.  **多入口 BPF 程序**：
+    *   在 `pwru.bpf.c` 中生成 5 个不同的 BPF 程序入口（例如 `kprobe_multi_arg1`, `kprobe_multi_arg2`...）。
+    *   每个程序专门负责从特定的寄存器/参数位置读取 `skb`。
+3.  **批量挂载**：
+    *   使用 `libbpf` 的 `bpf_program__attach_kprobe_multi_opts` 接口。
+    *   一次系统调用即可为一个组内的数百个函数完成挂载。
 
 ## 当前状态
 
