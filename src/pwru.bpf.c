@@ -13,6 +13,7 @@ struct config {
 	__u16 filter_dport;
 	__u8 filter_proto;
 	__u32 filter_pid;
+	__u16 filter_family;
 };
 
 struct {
@@ -34,6 +35,7 @@ struct event {
 	__u16 sport;
 	__u16 dport;
 	__u8 l4_proto;
+	__u16 family;
 };
 
 struct {
@@ -57,6 +59,7 @@ static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 	struct iphdr iph;
 	unsigned char *head;
 	__u16 network_header;
+	struct sock *sk;
 
 	cfg = bpf_map_lookup_elem(&config_map, &key);
 	if (!cfg) {
@@ -78,6 +81,14 @@ static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
 	e->protocol = BPF_CORE_READ(skb, protocol);
 	e->stack_id = bpf_get_stackid(ctx, &stack_map, 0);
+	
+	// Read Family
+	e->family = 0;
+	sk = BPF_CORE_READ(skb, sk);
+	if (sk) {
+		e->family = BPF_CORE_READ(sk, __sk_common.skc_family);
+	}
+
 	// Default IPs/Ports to 0
 	e->src_ip = 0;
 	e->dst_ip = 0;
@@ -122,7 +133,15 @@ static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 		}
 	}
 
-	// Apply filter ONLY if we successfully parsed IPs
+	// Apply Filters
+
+	// Family filter (checking skb->sk->sk_family)
+	if (cfg->filter_family != 0 && e->family != cfg->filter_family) {
+		bpf_ringbuf_discard(e, 0);
+		return 0;
+	}
+
+	// Apply filter ONLY if we successfully parsed IPs (for IP-specific filters)
 
 	if (e->src_ip != 0) {
 		if (cfg->filter_src_ip != 0 &&
@@ -151,11 +170,11 @@ static __always_inline int handle_packet(void *ctx, struct sk_buff *skb,
 			bpf_ringbuf_discard(e, 0);
 			return 0;
 		}
+	}
 
-		if (cfg->filter_pid != 0 && e->pid != cfg->filter_pid) {
-			bpf_ringbuf_discard(e, 0);
-			return 0;
-		}
+	if (cfg->filter_pid != 0 && e->pid != cfg->filter_pid) {
+		bpf_ringbuf_discard(e, 0);
+		return 0;
 	}
 
 	bpf_ringbuf_submit(e, 0);

@@ -39,6 +39,7 @@ struct config {
 	__u16 filter_dport;
 	__u8 filter_proto;
 	__u32 filter_pid;
+	__u16 filter_family;
 	bool list_funcs;
 	bool all_kprobes;
 	enum backend backend;
@@ -208,6 +209,7 @@ struct event {
 	__u16 sport;
 	__u16 dport;
 	__u8 l4_proto;
+	__u16 family;
 };
 
 struct env {
@@ -232,9 +234,24 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	else
 		snprintf(l4_str, sizeof(l4_str), "%d", e->l4_proto);
 
-	printf("skb: %llx [%s] Proto: 0x%x Src: %s:%d, Dst: %s:%d [%s] PID: %u, "
+	char fam_str[16] = "";
+	if (e->family == AF_UNIX)
+		snprintf(fam_str, sizeof(fam_str), "UNIX");
+	else if (e->family == AF_INET)
+		snprintf(fam_str, sizeof(fam_str), "INET");
+	else if (e->family == AF_INET6)
+		snprintf(fam_str, sizeof(fam_str), "INET6");
+	else if (e->family == AF_NETLINK)
+		snprintf(fam_str, sizeof(fam_str), "NETLINK");
+	else if (e->family == AF_PACKET)
+		snprintf(fam_str, sizeof(fam_str), "PACKET");
+	else
+		snprintf(fam_str, sizeof(fam_str), "%d", e->family);
+
+	printf("skb: %llx [%s] Family: %s Proto: 0x%x Src: %s:%d, Dst: %s:%d [%s] PID: "
+	       "%u, "
 	       "Comm: %s\n",
-	       (unsigned long long)e->skb_addr, func_name, ntohs(e->protocol), src,
+	       (unsigned long long)e->skb_addr, func_name, fam_str, ntohs(e->protocol), src,
 	       ntohs(e->sport), dst, ntohs(e->dport), l4_str, e->pid, e->comm);
 
 	struct env *env = ctx;
@@ -480,6 +497,18 @@ int main(int argc, char **argv)
 			i++;
 		} else if (strcmp(argv[i], "--pid") == 0 && i + 1 < argc) {
 			cfg.filter_pid = atoi(argv[++i]);
+		} else if (strcmp(argv[i], "--family") == 0 && i + 1 < argc) {
+			if (strcasecmp(argv[i + 1], "unix") == 0)
+				cfg.filter_family = AF_UNIX;
+			else if (strcasecmp(argv[i + 1], "inet") == 0)
+				cfg.filter_family = AF_INET;
+			else if (strcasecmp(argv[i + 1], "inet6") == 0)
+				cfg.filter_family = AF_INET6;
+			else if (strcasecmp(argv[i + 1], "netlink") == 0)
+				cfg.filter_family = AF_NETLINK;
+			else
+				cfg.filter_family = atoi(argv[i + 1]);
+			i++;
 		} else if (strcmp(argv[i], "--list-funcs") == 0) {
 			cfg.list_funcs = true;
 		} else if (strcmp(argv[i], "--all-kprobes") == 0) {
