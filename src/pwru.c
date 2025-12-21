@@ -8,6 +8,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <unistd.h>
 
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
@@ -423,6 +424,21 @@ static int get_skb_funcs(struct func_list *fl)
 
 int main(int argc, char **argv)
 {
+	struct rlimit r;
+	if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
+		// printf("Current RLIMIT_NOFILE: soft=%lu, hard=%lu\n",
+		//        r.rlim_cur, r.rlim_max);
+		if (r.rlim_max < 8192) {
+			r.rlim_max = 8192; // Try to bump hard limit
+		}
+		r.rlim_cur = r.rlim_max; // Bump soft limit to match hard
+		if (setrlimit(RLIMIT_NOFILE, &r)) {
+			fprintf(stderr,
+				"Warning: failed to increase rlimit: %s\n",
+				strerror(errno));
+		}
+	}
+
 	struct bpf_object *obj;
 	struct bpf_program *prog_kprobe = NULL, *prog_fentry = NULL;
 	struct bpf_link *link = NULL;
@@ -500,7 +516,12 @@ int main(int argc, char **argv)
 
 	// Auto-detect backend if not specified
 	if (cfg.backend == BACKEND_AUTO) {
-		if (access("/sys/kernel/btf/vmlinux", F_OK) == 0) {
+		if (cfg.all_kprobes) {
+			// fentry requires strict argument matching. For mass attachment,
+			// kprobe is much more reliable.
+			cfg.backend = BACKEND_KPROBE;
+			printf("Backend: kprobe (forced for mass attachment)\n");
+		} else if (access("/sys/kernel/btf/vmlinux", F_OK) == 0) {
 			cfg.backend = BACKEND_FENTRY;
 			printf("Backend: fentry (auto-detected)\n");
 		} else {
@@ -588,6 +609,8 @@ int main(int argc, char **argv)
 		}
 
 		for (i = 0; i < fl.count; i++) {
+			if (exiting)
+				break;
 			if (cfg.backend == BACKEND_KPROBE) {
 				links[i] = bpf_program__attach_kprobe(
 				    prog_kprobe, false, fl.names[i]);
