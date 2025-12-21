@@ -9,6 +9,10 @@ char LICENSE[] SEC("license") = "Dual BSD/GPL";
 struct config {
 	__u32 filter_src_ip;
 	__u32 filter_dst_ip;
+	__u16 filter_sport;
+	__u16 filter_dport;
+	__u8 filter_proto;
+	__u32 filter_pid;
 };
 
 struct {
@@ -25,6 +29,11 @@ struct event {
 	__u32 dst_ip;
 	__u32 pid;
 	char comm[16];
+	__u16 protocol;
+	__s32 stack_id;
+	__u16 sport;
+	__u16 dport;
+	__u8 l4_proto;
 };
 
 struct {
@@ -32,6 +41,13 @@ struct {
 	__uint(max_entries, 256 * 1024);
 
 } rb SEC(".maps");
+
+struct {
+	__uint(type, BPF_MAP_TYPE_STACK_TRACE);
+	__uint(key_size, sizeof(__u32));
+	__uint(value_size, 100 * sizeof(__u64));
+	__uint(max_entries, 1024);
+} stack_map SEC(".maps");
 
 SEC("kprobe/ip_rcv")
 
@@ -64,9 +80,15 @@ int kprobe_ip_rcv(struct pt_regs *ctx)
 	e->addr = PT_REGS_IP(ctx);
 	e->pid = bpf_get_current_pid_tgid() >> 32;
 	bpf_get_current_comm(&e->comm, sizeof(e->comm));
-	// Default IPs to 0
+	e->protocol = BPF_CORE_READ(skb, protocol);
+	e->stack_id = bpf_get_stackid(ctx, &stack_map, 0);
+	// Default IPs/Ports to 0
 	e->src_ip = 0;
 	e->dst_ip = 0;
+	e->sport = 0;
+	e->dport = 0;
+	e->l4_proto = 0;
+
 	// Try to parse IPv4
 	head = BPF_CORE_READ(skb, head);
 	network_header = BPF_CORE_READ(skb, network_header);
@@ -77,6 +99,29 @@ int kprobe_ip_rcv(struct pt_regs *ctx)
 			if (iph.version == 4) {
 				e->src_ip = iph.saddr;
 				e->dst_ip = iph.daddr;
+				e->l4_proto = iph.protocol;
+
+				// Parse L4
+				unsigned char *l4_header_start =
+				    ip_header_start + (iph.ihl * 4);
+
+				if (iph.protocol == IPPROTO_TCP) {
+					struct tcphdr tcp;
+					if (bpf_probe_read_kernel(
+						&tcp, sizeof(tcp),
+						l4_header_start) == 0) {
+						e->sport = tcp.source;
+						e->dport = tcp.dest;
+					}
+				} else if (iph.protocol == IPPROTO_UDP) {
+					struct udphdr udp;
+					if (bpf_probe_read_kernel(
+						&udp, sizeof(udp),
+						l4_header_start) == 0) {
+						e->sport = udp.source;
+						e->dport = udp.dest;
+					}
+				}
 			}
 		}
 	}
@@ -92,6 +137,26 @@ int kprobe_ip_rcv(struct pt_regs *ctx)
 
 		if (cfg->filter_dst_ip != 0 &&
 		    e->dst_ip != cfg->filter_dst_ip) {
+			bpf_ringbuf_discard(e, 0);
+			return 0;
+		}
+
+		if (cfg->filter_proto != 0 && e->l4_proto != cfg->filter_proto) {
+			bpf_ringbuf_discard(e, 0);
+			return 0;
+		}
+
+		if (cfg->filter_sport != 0 && e->sport != cfg->filter_sport) {
+			bpf_ringbuf_discard(e, 0);
+			return 0;
+		}
+
+		if (cfg->filter_dport != 0 && e->dport != cfg->filter_dport) {
+			bpf_ringbuf_discard(e, 0);
+			return 0;
+		}
+
+		if (cfg->filter_pid != 0 && e->pid != cfg->filter_pid) {
 			bpf_ringbuf_discard(e, 0);
 			return 0;
 		}
