@@ -1,33 +1,33 @@
-# C-pwru Implementation Log
+# C-pwru 实现日志
 
-This document records the step-by-step implementation of `C-pwru`, a C-based eBPF network tracer inspired by `pwru`.
+本文档记录了 `C-pwru` 的分步实现过程。这是一个基于 C 语言的 eBPF 网络追踪工具，灵感来自 `pwru`。
 
-## Phase 1: Environment & "Hello skb"
+## 第一阶段：环境搭建与 "Hello skb"
 
-### 1. Project Structure
-We established a standard C/eBPF project structure:
+### 1. 项目结构
+我们建立了标准的 C/eBPF 项目结构：
 
 ```text
 c-pwru/
-├── Makefile       # Build system
+├── Makefile       # 构建系统
 ├── src/
-│   ├── pwru.c     # User-space loader (libbpf)
-│   ├── pwru.bpf.c # Kernel-space eBPF program
-│   └── vmlinux.h  # Kernel type definitions (CO-RE)
-└── build/         # Compiled artifacts
+│   ├── pwru.c     # 用户态加载器 (libbpf)
+│   ├── pwru.bpf.c # 内核态 eBPF 程序
+│   └── vmlinux.h  # 内核类型定义 (CO-RE)
+└── build/         # 编译产物
 ```
 
-**Note on `vmlinux.h`**: We utilized the existing `vmlinux.h` from the parent `pwru` project to ensure compatibility with modern CO-RE (Compile Once - Run Everywhere) standards.
+**关于 `vmlinux.h`**：我们使用了现有的 `vmlinux.h` 以确保符合现代 CO-RE（一次编译，到处运行）标准。
 
-### 2. The Build System (Makefile)
-We created a `Makefile` to handle the dual-compilation process:
-1.  **eBPF Object**: Uses `clang` with `-target bpf` to compile `pwru.bpf.c` into `pwru.bpf.o`.
-2.  **User Binary**: Uses `gcc`/`cc` to compile `pwru.c` and link against `libbpf`, `libelf`, and `zlib`.
+### 2. 构建系统 (Makefile)
+我们创建了一个 `Makefile` 来 handle 双重编译流程：
+1.  **eBPF 对象**：使用 `clang` 的 `-target bpf` 参数将 `pwru.bpf.c` 编译为 `pwru.bpf.o`。
+2.  **用户态二进制**：使用 `gcc`/`cc` 编译 `pwru.c` 并链接 `libbpf`、`libelf` 和 `zlib`。
 
-### 3. First Trace (kprobe/ip_rcv)
-The initial goal was to prove we could hook a function. We chose `ip_rcv`, the entry point for IPv4 packets.
+### 3. 第一次追踪 (kprobe/ip_rcv)
+最初的目标是证明我们可以挂载一个函数。我们选择了 `ip_rcv`，它是 IPv4 数据包的入口点。
 
-**Kernel (pwru.bpf.c):**
+**内核态 (pwru.bpf.c):**
 ```c
 SEC("kprobe/ip_rcv")
 int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
@@ -36,25 +36,25 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 }
 ```
 
-**User (pwru.c):**
-Used `libbpf` APIs to:
-1. Open and load `pwru.bpf.o`.
-2. Find the `ip_rcv` program.
-3. Attach it using `bpf_program__attach`.
-4. Keep the process alive to maintain the hook.
+**用户态 (pwru.c):**
+使用 `libbpf` API：
+1. 打开并加载 `pwru.bpf.o`。
+2. 找到 `ip_rcv` 程序。
+3. 使用 `bpf_program__attach` 进行挂载。
+4. 保持进程运行以维持挂载状态。
 
 ---
 
-## Phase 2: Deep Inspection & Filtering
+## 第二阶段：深度解析与过滤
 
-### 1. Parsing `sk_buff`
-To filter traffic, we needed to look inside the packet. Accessing `sk_buff` fields directly is unstable across kernel versions, so we used `BPF_CORE_READ` macros.
+### 1. 解析 `sk_buff`
+为了过滤流量，我们需要查看数据包内部。由于 `sk_buff` 的字段在不同内核版本间不稳定，我们使用了 `BPF_CORE_READ` 宏。
 
-**Logic:**
-1.  Read `skb->head` (start of buffer).
-2.  Read `skb->network_header` (offset to IP header).
-3.  Calculate `ip_header_start = head + network_header`.
-4.  Use `bpf_probe_read_kernel` to copy the `struct iphdr` into stack memory.
+**逻辑：**
+1.  读取 `skb->head`（缓冲区起始位置）。
+2.  读取 `skb->network_header`（相对于 head 的 IP 头偏移）。
+3.  计算 `ip_header_start = head + network_header`。
+4.  使用 `bpf_probe_read_kernel` 将 `struct iphdr` 拷贝到栈内存。
 
 ```c
     unsigned char *head = BPF_CORE_READ(skb, head);
@@ -63,76 +63,84 @@ To filter traffic, we needed to look inside the packet. Accessing `sk_buff` fiel
     bpf_probe_read_kernel(&iph, sizeof(iph), head + net_off);
 ```
 
-### 2. Configuration via BPF Maps
-Hardcoding IPs in C code is impractical. We implemented a `BPF_MAP_TYPE_ARRAY` to pass configuration from user space to kernel space.
+### 2. 通过 BPF Map 进行配置
+在 C 代码中硬编码 IP 是不现实的。我们实现了 `BPF_MAP_TYPE_ARRAY` 来将配置从用户态传递到内核态。
 
-*   **Map**: `config_map` (Key: 0, Value: `struct config`).
-*   **User Space**: Parses CLI args (`--src-ip`, `--dst-ip`) and updates the map *before* attaching probes.
-*   **Kernel Space**: Lookups the map at the start of the kprobe. If the packet doesn't match the filter, it returns early (`0`).
+*   **Map**: `config_map` (Key: 0, Value: `struct config`)。
+*   **用户态**：解析命令行参数（`--src-ip`, `--dst-ip`）并在挂载探针*之前*更新 Map。
+*   **内核态**：在 kprobe 开始时查找 Map。如果数据包不匹配过滤器，则提前返回 (`0`)。
 
-### 3. High-Performance Output (Ring Buffer)
-`bpf_printk` uses `/sys/kernel/debug/tracing/trace_pipe`, which is slow and global. We migrated to `BPF_MAP_TYPE_RINGBUF`.
+### 3. 高性能输出 (Ring Buffer)
+`bpf_printk` 使用的 `/sys/kernel/debug/tracing/trace_pipe` 速度慢且是全局共享的。我们迁移到了 `BPF_MAP_TYPE_RINGBUF`。
 
-*   **Structure**: Defined `struct event` containing `skb` address, IPs, PID, and Comm.
-*   **Kernel**:
+*   **结构**：定义了 `struct event`，包含 `skb` 地址、IP 地址、PID 和进程名。
+*   **内核态**：
     ```c
     e = bpf_ringbuf_reserve(&rb, sizeof(*e), 0);
-    // ... fill data ...
+    // ... 填充数据 ...
     bpf_ringbuf_submit(e, 0);
     ```
-*   **User**: Implemented a polling loop using `ring_buffer__poll` and a callback function to pretty-print events.
+*   **用户态**：使用 `ring_buffer__poll` 实现轮询循环，并通过回调函数美化输出事件。
 
-## Current Status
-*   [x] **Hook**: Static hook on `ip_rcv`.
-*   [x] **Parsing**: Extract IPv4 Src/Dst.
-*   [x] **Filtering**: CLI-based IP filtering.
-*   [x] **Output**: Efficient RingBuffer events.
-*   [x] **BTF Magic**: Automated discovery of 1000+ kernel functions.
-*   [x] **Phase 4**: Dynamic Mass Attachment (1100+ kprobes).
-*   [x] **Phase 4.5**: Kprobe Whitelist Filtering (Optimized startup).
-*   [ ] **Phase 5**: Stack trace, symbol resolution, and performance optimization.
+## 当前状态
+*   [x] **挂载**：`ip_rcv` 的静态挂载。
+*   [x] **解析**：提取 IPv4 源/目的地址。
+*   [x] **过滤**：基于 CLI 的 IP 过滤。
+*   [x] **输出**：高效的 RingBuffer 事件传输。
+*   [x] **BTF 魔法**：自动发现 1000+ 个内核函数。
+*   [x] **第四阶段**：动态大规模挂载 (1100+ kprobes)。
+*   [x] **第四.五阶段**：Kprobe 白名单过滤（优化启动速度）。
+*   [x] **第五阶段**：堆栈追踪、符号解析、L4/PID 过滤。
+*   [ ] **第六阶段**：性能优化 (fentry)。
 
----
+## 第五阶段：符号解析与调试（已完成）
 
-## Phase 3: BTF Magic (Automation)
-(details...)
+### 1. 符号解析
+实现了将内核地址映射回函数名的逻辑：
+-   **内核态**：在 BPF 程序中捕获 `PT_REGS_IP(ctx)`。
+-   **用户态**：将 `/proc/kallsyms` 解析为有序数组，并使用二分查找解析名称。
 
-## Phase 4: Dynamic Mass Attachment
-(details...)
+### 2. “0 事件”之谜（已解决）
+（详见代码实现...）
 
-## Phase 5: Symbol Resolution & Debugging (In Progress)
+### 3. 数据包协议识别
+为了更好地处理非 IP 数据包（或解析失败的情况），我们增加了从 `skb` 提取 `protocol` 的逻辑。
+-   **内核态**：读取 `skb->protocol`。
+-   **用户态**：在事件日志中打印协议（例如 IPv4 显示为 `Proto: 0x800`）。
 
-### 1. Symbol Resolution
-We implemented the logic to map kernel addresses back to function names:
--   **Kernel**: Capture `PT_REGS_IP(ctx)` in the BPF program.
--   **User**: Parse `/proc/kallsyms` into a sorted array and use binary search to resolve names.
+### 4. 堆栈追踪 (Stack Traces)
+增加了调用栈捕获，为每个事件提供上下文信息。
+-   **Map**: `stack_map` (`BPF_MAP_TYPE_STACK_TRACE`)。
+-   **内核态**：使用 `bpf_get_stackid(ctx, &stack_map, 0)` 捕获堆栈 ID。
+-   **用户态**：将堆栈 ID 解析为 IP 地址数组，再通过 `find_ksym` 将 IP 解析为符号。
 
-### 2. The "0 Events" Mystery
-When running with `--all-kprobes`, we initially saw 0 events in the output, despite successfully attaching to 1000+ functions.
+### 5. L4 过滤（端口与协议）
+实现了传输层 (L4) 属性的解析与过滤。
+-   **内核态**：
+    -   读取 `iph.protocol`。
+    -   根据协议解析 `tcphdr` 或 `udphdr` 以提取源/目的端口。
+    -   应用过滤器：`filter_proto`, `filter_sport`, `filter_dport`。
+-   **用户态**：
+    -   增加 CLI 参数：`--proto`, `--sport`, `--dport`, `--port`。
+    -   更新 `struct config` 以将这些过滤器传递给 BPF。
+    -   更新输出以显示 `Proto: TCP/UDP` 和端口信息（如 `1.2.3.4:80`）。
 
-**Debugging Steps:**
-1.  **Trace Pipe**: Enabled `bpf_printk` and confirmed that probes **are triggering**.
-    -   `Enter: ffffffff...` logs appear.
-    -   `skb: ffff...` logs appear.
-2.  **Invalid SKB Context**:
-    -   Some functions (e.g., `ffffffffb8aa9091`) return `head: 0` when reading `skb->head` via `BPF_CORE_READ`.
-    -   This suggests either an invalid `skb` pointer or an issue with `PT_REGS_PARM1` context in specific kprobes.
-3.  **Valid Packets Found**:
-    -   Other functions (e.g., `ffffffffb8ab4fd1`) show **valid head pointers** (`head: ffff...`).
-    -   This proves that valid packets are being intercepted.
-4.  **Permissive Mode**:
-    -   Modified BPF program to submit events even if IP parsing fails (defaulting to 0.0.0.0).
-    -   Investigating why these events are not appearing in RingBuffer user-space consumption.
+### 6. PID 过滤与错误处理
+增加了按进程 ID (TGID) 过滤的功能，并对堆栈捕获失败进行显式报告。
+-   **内核态**：在配置 Map 中加入 `filter_pid` 并应用于 `kprobe_ip_rcv`。
+-   **用户态**：
+    -   增加 `--pid <id>` 参数。
+    -   更新 `handle_event` 以检查负值的 `stack_id`（错误码）。
+    -   特别处理 `-EEXIST` 以报告 "[Stack truncated: map size limit reached]"。
 
-### Next Steps
--   Investigate RingBuffer submission path.
--   Verify `PT_REGS_PARM1` correctness for all attached functions.
--   Refine packet parsing logic to handle non-IP packets gracefully.
+## 第六阶段：性能优化（计划中）
 
-## How to Run
+我们的目标是通过研究 `fentry` 来降低大规模追踪的开销。
+详见 [docs/kprobe_vs_fentry.md](docs/kprobe_vs_fentry.md) 了解详细对比。
+
+## 如何运行
 ```bash
 cd c-pwru
 make
-sudo ./build/pwru --dst-ip 8.8.8.8
+sudo ./build/pwru --proto tcp --dport 80
 ```
-
