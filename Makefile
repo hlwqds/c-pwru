@@ -25,10 +25,11 @@ BPF_OBJ := $(BUILD_DIR)/pwru.bpf.o
 USER_SRC := $(SRC_DIR)/pwru.c \
             $(SRC_DIR)/pwru_kprobe.c \
             $(SRC_DIR)/pwru_fentry.c \
-            $(SRC_DIR)/pwru_kprobe_multi.c
+            $(SRC_DIR)/pwru_kprobe_multi.c \
+            $(SRC_DIR)/pwru_error.c
 USER_BIN := $(BUILD_DIR)/pwru
 
-.PHONY: all clean libbpf_headers
+.PHONY: all clean clean-all libbpf_headers
 
 all: $(USER_BIN)
 
@@ -59,4 +60,6 @@ $(USER_BIN): $(USER_SRC) $(BPF_OBJ) $(LIBBPF_OBJ) | $(BUILD_DIR) $(LIBBPF_HEADER
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+clean-all: clean
 	$(MAKE) -C $(LIBBPF_DIR) clean

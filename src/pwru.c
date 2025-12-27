@@ -1,4 +1,5 @@
 #include "pwru_backend.h"
+#include "pwru_error.h"
 #include <argp.h>
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
@@ -50,7 +51,7 @@ struct config {
 
 static int resize_func_list(struct func_list *fl)
 {
-	int new_cap = fl->capacity == 0 ? 128 : fl->capacity * 2;
+	int new_cap = fl->capacity == 0 ? FUNC_LIST_INIT_CAP : fl->capacity * 2;
 	char **new_names = realloc(fl->names, new_cap * sizeof(char *));
 	__s32 *new_ids = realloc(fl->ids, new_cap * sizeof(__s32));
 	__u8 *new_idxs = realloc(fl->arg_idxs, new_cap * sizeof(__u8));
@@ -58,28 +59,28 @@ static int resize_func_list(struct func_list *fl)
 		free(new_names);
 		free(new_ids);
 		free(new_idxs);
-		return -1;
+		return PWRU_ERR_NOMEM;
 	}
 	fl->names = new_names;
 	fl->ids = new_ids;
 	fl->arg_idxs = new_idxs;
 	fl->capacity = new_cap;
-	return 0;
+	return PWRU_OK;
 }
 
-int add_func(struct func_list *fl, const char *name, __s32 id, __u8 arg_idx)
+pwru_err_t add_func(struct func_list *fl, const char *name, __s32 id, __u8 arg_idx)
 {
 	if (fl->count == fl->capacity) {
-		if (resize_func_list(fl) < 0)
-			return -1;
+		if (resize_func_list(fl) != PWRU_OK)
+			return PWRU_ERR_NOMEM;
 	}
 	fl->names[fl->count] = strdup(name);
 	fl->ids[fl->count] = id;
 	fl->arg_idxs[fl->count] = arg_idx;
 	if (!fl->names[fl->count])
-		return -1;
+		return PWRU_ERR_NOMEM;
 	fl->count++;
-	return 0;
+	return PWRU_OK;
 }
 
 static int compare_strs(const void *a, const void *b)
@@ -89,10 +90,10 @@ static int compare_strs(const void *a, const void *b)
 	return strcmp(*pa, *pb);
 }
 
-static int load_available_funcs(struct func_list *fl)
+static pwru_err_t load_available_funcs(struct func_list *fl)
 {
 	FILE *f;
-	char line[256];
+	char line[LINE_BUF_SIZE];
 	char *p;
 
 	// Try standard locations
@@ -102,7 +103,7 @@ static int load_available_funcs(struct func_list *fl)
 		    "/sys/kernel/debug/tracing/available_filter_functions",
 		    "r");
 	if (!f)
-		return -1;
+		return PWRU_ERR_NOT_FOUND;
 
 	while (fgets(line, sizeof(line), f)) {
 		// Format: "function_name" or "function_name [module]" or
@@ -118,7 +119,7 @@ static int load_available_funcs(struct func_list *fl)
 	fclose(f);
 
 	qsort(fl->names, fl->count, sizeof(char *), compare_strs);
-	return 0;
+	return PWRU_OK;
 }
 
 // Ksyms logic
@@ -141,17 +142,17 @@ static int compare_ksyms(const void *a, const void *b)
 	return 0;
 }
 
-static int load_kallsyms()
+static pwru_err_t load_kallsyms()
 {
 	FILE *f = fopen("/proc/kallsyms", "r");
-	char line[256];
-	char name[128];
+	char line[LINE_BUF_SIZE];
+	char name[LINE_BUF_SIZE]; // Use LINE_BUF_SIZE for symbol names too
 	char type;
 	__u64 addr;
 	int cap = 0;
 
 	if (!f)
-		return -1;
+		return PWRU_ERR_NOT_FOUND;
 
 	while (fgets(line, sizeof(line), f)) {
 		if (sscanf(line, "%llx %c %s", &addr, &type, name) != 3)
@@ -163,12 +164,12 @@ static int load_kallsyms()
 			continue;
 
 		if (ksym_count >= cap) {
-			cap = cap == 0 ? 4096 : cap * 2;
+			cap = cap == 0 ? KSYMS_INIT_CAP : cap * 2;
 			struct ksym *new_ksyms =
 			    realloc(ksyms, cap * sizeof(struct ksym));
 			if (!new_ksyms) {
 				fclose(f);
-				return -1;
+				return PWRU_ERR_NOMEM;
 			}
 			ksyms = new_ksyms;
 		}
@@ -180,7 +181,7 @@ static int load_kallsyms()
 	fclose(f);
 
 	qsort(ksyms, ksym_count, sizeof(struct ksym), compare_ksyms);
-	return 0;
+	return PWRU_OK;
 }
 
 static const char *find_ksym(__u64 addr)
@@ -210,7 +211,7 @@ struct event {
 	__u32 src_ip;
 	__u32 dst_ip;
 	__u32 pid;
-	char comm[16];
+	char comm[COMM_LEN];
 	__u16 protocol;
 	__s32 stack_id;
 	__u16 sport;
@@ -264,10 +265,10 @@ static int handle_event(void *ctx, void *data, size_t data_sz)
 	struct env *env = ctx;
 	if (e->stack_id >= 0) {
 		if (env && env->stack_map_fd >= 0) {
-			__u64 ip[100] = {};
+			__u64 ip[STACK_TRACE_DEPTH] = {};
 			if (bpf_map_lookup_elem(env->stack_map_fd, &e->stack_id,
 						ip) == 0) {
-				for (int i = 0; i < 100 && ip[i]; i++) {
+				for (int i = 0; i < STACK_TRACE_DEPTH && ip[i]; i++) {
 					const char *sym = find_ksym(ip[i]);
 					printf("    %s\n", sym);
 				}
@@ -341,120 +342,79 @@ static __u8 get_skb_arg_idx(struct btf *btf, const struct btf_type *func,
 	return 0;
 }
 
-static int get_skb_funcs(struct func_list *fl)
+static pwru_err_t get_skb_funcs(struct func_list *fl)
 {
 	struct btf *btf;
-
 	__s32 skb_id;
-
 	struct func_list available = {0};
-
 	int i;
 
 	// Load whitelist
-
-	if (load_available_funcs(&available) < 0) {
-
-		fprintf(stderr,
-			"Warning: failed to load available_filter_functions. "
-			"Trying blindly...\n");
-	}
+	load_available_funcs(&available);
 
 	btf = btf__load_vmlinux_btf();
-
 	if (!btf) {
-
 		fprintf(stderr, "Failed to load vmlinux BTF\n");
-
-		// Clean up available
-
 		for (i = 0; i < available.count; i++)
 			free(available.names[i]);
-
 		free(available.names);
 		free(available.ids);
 		free(available.arg_idxs);
-
-		return -1;
+		return PWRU_ERR_BPF_LOAD;
 	}
 
 	skb_id = btf__find_by_name_kind(btf, "sk_buff", BTF_KIND_STRUCT);
-
 	if (skb_id < 0) {
-
 		fprintf(stderr, "Failed to find 'struct sk_buff' in BTF\n");
-
 		btf__free(btf);
-
-		// Clean up available
-
 		for (i = 0; i < available.count; i++)
 			free(available.names[i]);
-
 		free(available.names);
 		free(available.ids);
 		free(available.arg_idxs);
-
-		return -1;
+		return PWRU_ERR_NOT_FOUND;
 	}
 
 	int nr_types = btf__type_cnt(btf);
-
 	for (i = 1; i <= nr_types; i++) {
-
 		const struct btf_type *t = btf__type_by_id(btf, i);
-
 		if (!t || !btf_is_func(t))
 			continue;
 
 		__u8 arg_idx = get_skb_arg_idx(btf, t, skb_id);
-
 		if (arg_idx > 0) {
-
 			const char *name =
 			    btf__name_by_offset(btf, t->name_off);
 
 			// Filter against whitelist
-
 			if (available.count > 0) {
-
 				if (!bsearch(&name, available.names,
 					     available.count, sizeof(char *),
 					     compare_strs)) {
-
 					continue;
 				}
 			}
 
-			if (add_func(fl, name, i, arg_idx) < 0) {
-
-				fprintf(stderr,
-					"Failed to add function name\n");
-
+			if (add_func(fl, name, i, arg_idx) != PWRU_OK) {
 				btf__free(btf);
-
 				for (i = 0; i < available.count; i++)
 					free(available.names[i]);
-
 				free(available.names);
 				free(available.ids);
 				free(available.arg_idxs);
-
-				return -1;
+				return PWRU_ERR_NOMEM;
 			}
 		}
 	}
 
 	btf__free(btf);
-
 	for (i = 0; i < available.count; i++)
 		free(available.names[i]);
-
 	free(available.names);
 	free(available.ids);
 	free(available.arg_idxs);
 
-	return 0;
+	return PWRU_OK;
 }
 
 static struct backend_ops *get_backend_ops(enum backend b) {
@@ -469,9 +429,11 @@ static struct backend_ops *get_backend_ops(enum backend b) {
 int main(int argc, char **argv)
 {
 	struct rlimit r;
+	pwru_err_t err_ret;
+
 	if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
-		if (r.rlim_max < 8192) {
-			r.rlim_max = 8192;
+		if (r.rlim_max < DEFAULT_RLIMIT_NOFILE) {
+			r.rlim_max = DEFAULT_RLIMIT_NOFILE;
 		}
 		r.rlim_cur = r.rlim_max;
 		if (setrlimit(RLIMIT_NOFILE, &r)) {
@@ -484,7 +446,7 @@ int main(int argc, char **argv)
 	struct ring_buffer *rb = NULL;
 	struct config cfg = {0};
 	struct env env = {.stack_map_fd = -1};
-	int err, i;
+	int i;
 	int map_fd;
 	__u32 key = 0;
 	bool test_attach = false;
@@ -555,7 +517,7 @@ int main(int argc, char **argv)
 	}
 
 	if (cfg.list_funcs) {
-		if (get_skb_funcs(&fl) < 0)
+		if (get_skb_funcs(&fl) != PWRU_OK)
 			return 1;
 
 		for (i = 0; i < fl.count; i++) {
@@ -592,7 +554,7 @@ int main(int argc, char **argv)
 	}
 
 	printf("Loading kallsyms...\n");
-	if (load_kallsyms() < 0) {
+	if (load_kallsyms() != PWRU_OK) {
 		fprintf(stderr, "Warning: failed to load /proc/kallsyms, "
 				"symbols will not be resolved.\n");
 	}
@@ -605,20 +567,20 @@ int main(int argc, char **argv)
 	printf("Opening BPF object file...\n");
 	obj = bpf_object__open_file("build/pwru.bpf.o", NULL);
 	if (libbpf_get_error(obj)) {
-		fprintf(stderr, "ERROR: opening BPF object file failed\n");
+		fprintf(stderr, "ERROR: opening BPF object file failed: %s\n", 
+			pwru_strerror(pwru_libbpf_to_err(libbpf_get_error(obj))));
 		return 1;
 	}
 
 	// Setup programs (autoload settings)
-	if (ops->setup(obj) < 0) {
-		fprintf(stderr, "ERROR: backend setup failed\n");
+	if ((err_ret = ops->setup(obj)) != PWRU_OK) {
+		fprintf(stderr, "ERROR: backend setup failed: %s\n", pwru_strerror(err_ret));
 		goto cleanup;
 	}
 
 	printf("Loading BPF object...\n");
-	err = bpf_object__load(obj);
-	if (err) {
-		fprintf(stderr, "ERROR: loading BPF object failed: %d\n", err);
+	if (bpf_object__load(obj)) {
+		fprintf(stderr, "ERROR: loading BPF object failed\n");
 		goto cleanup;
 	}
 
@@ -645,12 +607,11 @@ int main(int argc, char **argv)
 	// Prepare functions list
 	if (cfg.all_kprobes) {
 		printf("Scanning for skb functions...\n");
-		if (get_skb_funcs(&fl) < 0)
+		if (get_skb_funcs(&fl) != PWRU_OK)
 			goto cleanup;
 		printf("Found %d functions.\n", fl.count);
 	} else {
 		// Single attach to ip_rcv
-		// We need to resolve ID/ArgIdx for fentry/kprobe-multi
 		struct btf *btf = btf__load_vmlinux_btf();
 		__s32 id = 0;
 		__u8 arg_idx = 0;
@@ -674,9 +635,8 @@ int main(int argc, char **argv)
 	printf("Attaching BPF programs...\n");
 	clock_gettime(CLOCK_MONOTONIC, &start);
 
-	if (ops->attach(obj, &fl, &state) < 0) {
-		fprintf(stderr, "ERROR: attach failed\n");
-		// continue to cleanup?
+	if ((err_ret = ops->attach(obj, &fl, &state)) != PWRU_OK) {
+		fprintf(stderr, "ERROR: attach failed: %s\n", pwru_strerror(err_ret));
 	}
 	
 	// Free names (we already used them for attachment)
@@ -717,13 +677,12 @@ int main(int argc, char **argv)
 	printf("Press Ctrl+C to stop.\n");
 
 	while (!exiting) {
-		err = ring_buffer__poll(rb, 100 /* timeout, ms */);
-		if (err == -EINTR) {
-			err = 0;
+		int rb_err = ring_buffer__poll(rb, POLL_TIMEOUT_MS);
+		if (rb_err == -EINTR) {
 			break;
 		}
-		if (err < 0) {
-			fprintf(stderr, "ERROR: ring buffer poll: %d\n", err);
+		if (rb_err < 0) {
+			fprintf(stderr, "ERROR: ring buffer poll: %d\n", rb_err);
 			break;
 		}
 	}

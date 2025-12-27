@@ -4,11 +4,11 @@
 #include <errno.h>
 #include <unistd.h>
 
-static int fentry_setup(struct bpf_object *obj)
+static pwru_err_t fentry_setup(struct bpf_object *obj)
 {
 	struct bpf_program *p;
 	int i;
-	char name[32];
+	char name[PROG_NAME_LEN];
 
 	p = bpf_object__find_program_by_name(obj, "kprobe_ip_rcv");
 	if (p) bpf_program__set_autoload(p, false);
@@ -18,20 +18,20 @@ static int fentry_setup(struct bpf_object *obj)
 		p = bpf_object__find_program_by_name(obj, name);
 		if (p) bpf_program__set_autoload(p, false);
 	}
-	return 0;
+	return PWRU_OK;
 }
 
-static int fentry_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
+static pwru_err_t fentry_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
 {
 	struct bpf_program *prog = bpf_object__find_program_by_name(obj, "fentry_ip_rcv");
 	int i, prog_fd;
 
-	if (!prog) return -1;
+	if (!prog) return PWRU_ERR_BPF_OPEN;
 	prog_fd = bpf_program__fd(prog);
 
 	state->total_funcs = fl->count;
 	state->fentry_fds = calloc(fl->count, sizeof(int));
-	if (!state->fentry_fds) return -ENOMEM;
+	if (!state->fentry_fds) return PWRU_ERR_NOMEM;
 
 	for (i = 0; i < fl->count; i++) {
 		if (exiting) break;
@@ -46,7 +46,7 @@ static int fentry_attach(struct bpf_object *obj, struct func_list *fl, struct at
 			state->count++;
 		}
 	}
-	return 0;
+	return PWRU_OK;
 }
 
 static void fentry_detach(struct attach_state *state)

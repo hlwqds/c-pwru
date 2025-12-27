@@ -1157,5 +1157,77 @@
     "directory": "/home/huanglin/code/pwru/c-pwru",
     "file": "/home/huanglin/code/pwru/c-pwru/src/pwru.c",
     "output": "/home/huanglin/code/pwru/c-pwru/build/pwru"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-c",
+      "-g",
+      "-O2",
+      "-Wall",
+      "-Ibuild/libbpf_headers/usr/include",
+      "-Isrc",
+      "libbpf/src/libbpf.a",
+      "-o",
+      "build/pwru",
+      "src/pwru_kprobe.c"
+    ],
+    "directory": "/home/huanglin/code/pwru/c-pwru",
+    "file": "/home/huanglin/code/pwru/c-pwru/src/pwru_kprobe.c",
+    "output": "/home/huanglin/code/pwru/c-pwru/build/pwru"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-c",
+      "-g",
+      "-O2",
+      "-Wall",
+      "-Ibuild/libbpf_headers/usr/include",
+      "-Isrc",
+      "libbpf/src/libbpf.a",
+      "-o",
+      "build/pwru",
+      "src/pwru_fentry.c"
+    ],
+    "directory": "/home/huanglin/code/pwru/c-pwru",
+    "file": "/home/huanglin/code/pwru/c-pwru/src/pwru_fentry.c",
+    "output": "/home/huanglin/code/pwru/c-pwru/build/pwru"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-c",
+      "-g",
+      "-O2",
+      "-Wall",
+      "-Ibuild/libbpf_headers/usr/include",
+      "-Isrc",
+      "libbpf/src/libbpf.a",
+      "-o",
+      "build/pwru",
+      "src/pwru_kprobe_multi.c"
+    ],
+    "directory": "/home/huanglin/code/pwru/c-pwru",
+    "file": "/home/huanglin/code/pwru/c-pwru/src/pwru_kprobe_multi.c",
+    "output": "/home/huanglin/code/pwru/c-pwru/build/pwru"
+  },
+  {
+    "arguments": [
+      "/usr/bin/cc",
+      "-c",
+      "-g",
+      "-O2",
+      "-Wall",
+      "-Ibuild/libbpf_headers/usr/include",
+      "-Isrc",
+      "libbpf/src/libbpf.a",
+      "-o",
+      "build/pwru",
+      "src/pwru_error.c"
+    ],
+    "directory": "/home/huanglin/code/pwru/c-pwru",
+    "file": "/home/huanglin/code/pwru/c-pwru/src/pwru_error.c",
+    "output": "/home/huanglin/code/pwru/c-pwru/build/pwru"
   }
 ]

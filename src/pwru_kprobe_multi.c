@@ -3,7 +3,7 @@
 #include <stdio.h>
 #include <errno.h>
 
-static int kprobe_multi_setup(struct bpf_object *obj)
+static pwru_err_t kprobe_multi_setup(struct bpf_object *obj)
 {
 	struct bpf_program *p;
 
@@ -13,14 +13,14 @@ static int kprobe_multi_setup(struct bpf_object *obj)
 	p = bpf_object__find_program_by_name(obj, "fentry_ip_rcv");
 	if (p) bpf_program__set_autoload(p, false);
 	
-	return 0;
+	return PWRU_OK;
 }
 
-static int kprobe_multi_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
+static pwru_err_t kprobe_multi_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
 {
 	int i;
 	struct func_list groups[MAX_ARGS_SUPPORTED] = {0};
-	char prog_name[32];
+	char prog_name[PROG_NAME_LEN];
 	struct bpf_program *prog;
 
 	// Group functions
@@ -56,7 +56,7 @@ static int kprobe_multi_attach(struct bpf_object *obj, struct func_list *fl, str
 		free(groups[i].ids);
 		free(groups[i].arg_idxs);
 	}
-	return 0;
+	return PWRU_OK;
 }
 
 static void kprobe_multi_detach(struct attach_state *state)

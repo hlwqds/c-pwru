@@ -3,11 +3,11 @@
 #include <stdio.h>
 #include <errno.h>
 
-static int kprobe_setup(struct bpf_object *obj)
+static pwru_err_t kprobe_setup(struct bpf_object *obj)
 {
 	struct bpf_program *p;
 	int i;
-	char name[32];
+	char name[PROG_NAME_LEN];
 
 	p = bpf_object__find_program_by_name(obj, "fentry_ip_rcv");
 	if (p) bpf_program__set_autoload(p, false);
@@ -17,19 +17,19 @@ static int kprobe_setup(struct bpf_object *obj)
 		p = bpf_object__find_program_by_name(obj, name);
 		if (p) bpf_program__set_autoload(p, false);
 	}
-	return 0;
+	return PWRU_OK;
 }
 
-static int kprobe_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
+static pwru_err_t kprobe_attach(struct bpf_object *obj, struct func_list *fl, struct attach_state *state)
 {
 	struct bpf_program *prog = bpf_object__find_program_by_name(obj, "kprobe_ip_rcv");
 	int i;
 
-	if (!prog) return -1;
+	if (!prog) return PWRU_ERR_BPF_OPEN;
 
 	state->total_funcs = fl->count;
 	state->links = calloc(fl->count, sizeof(struct bpf_link *));
-	if (!state->links) return -ENOMEM;
+	if (!state->links) return PWRU_ERR_NOMEM;
 
 	for (i = 0; i < fl->count; i++) {
 		if (exiting) break;
@@ -40,7 +40,7 @@ static int kprobe_attach(struct bpf_object *obj, struct func_list *fl, struct at
 			state->count++;
 		}
 	}
-	return 0;
+	return PWRU_OK;
 }
 
 static void kprobe_detach(struct attach_state *state)
