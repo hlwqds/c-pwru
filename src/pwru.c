@@ -1,3 +1,4 @@
+#include "pwru_backend.h"
 #include <argp.h>
 #include <arpa/inet.h>
 #include <bpf/bpf.h>
@@ -12,8 +13,6 @@
 #include <time.h>
 #include <unistd.h>
 
-#define MAX_ARGS_SUPPORTED 5
-
 static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
 			   va_list args)
 {
@@ -22,7 +21,7 @@ static int libbpf_print_fn(enum libbpf_print_level level, const char *format,
 	return vfprintf(stderr, format, args);
 }
 
-static volatile bool exiting = false;
+volatile bool exiting = false;
 
 static void sig_handler(int sig)
 {
@@ -49,14 +48,6 @@ struct config {
 	enum backend backend;
 };
 
-struct func_list {
-	char **names;
-	__s32 *ids; // BTF IDs
-	__u8 *arg_idxs;
-	int count;
-	int capacity;
-};
-
 static int resize_func_list(struct func_list *fl)
 {
 	int new_cap = fl->capacity == 0 ? 128 : fl->capacity * 2;
@@ -76,7 +67,7 @@ static int resize_func_list(struct func_list *fl)
 	return 0;
 }
 
-static int add_func(struct func_list *fl, const char *name, __s32 id, __u8 arg_idx)
+int add_func(struct func_list *fl, const char *name, __s32 id, __u8 arg_idx)
 {
 	if (fl->count == fl->capacity) {
 		if (resize_func_list(fl) < 0)
@@ -466,28 +457,29 @@ static int get_skb_funcs(struct func_list *fl)
 	return 0;
 }
 
+static struct backend_ops *get_backend_ops(enum backend b) {
+	switch (b) {
+		case BACKEND_KPROBE: return &kprobe_ops;
+		case BACKEND_FENTRY: return &fentry_ops;
+		case BACKEND_KPROBE_MULTI: return &kprobe_multi_ops;
+		default: return NULL;
+	}
+}
+
 int main(int argc, char **argv)
 {
 	struct rlimit r;
 	if (getrlimit(RLIMIT_NOFILE, &r) == 0) {
-		// printf("Current RLIMIT_NOFILE: soft=%lu, hard=%lu\n",
-		//        r.rlim_cur, r.rlim_max);
 		if (r.rlim_max < 8192) {
-			r.rlim_max = 8192; // Try to bump hard limit
+			r.rlim_max = 8192;
 		}
-		r.rlim_cur = r.rlim_max; // Bump soft limit to match hard
+		r.rlim_cur = r.rlim_max;
 		if (setrlimit(RLIMIT_NOFILE, &r)) {
-			fprintf(stderr,
-				"Warning: failed to increase rlimit: %s\n",
-				strerror(errno));
+			fprintf(stderr, "Warning: failed to increase rlimit: %s\n", strerror(errno));
 		}
 	}
 
 	struct bpf_object *obj;
-	struct bpf_program *prog_kprobe = NULL, *prog_fentry = NULL;
-	struct bpf_program *prog_kprobe_multi[MAX_ARGS_SUPPORTED] = {NULL};
-	struct bpf_link *link = NULL;
-	struct bpf_link *multi_links[MAX_ARGS_SUPPORTED] = {NULL};
 	struct bpf_map *map_cfg, *map_rb, *map_stack;
 	struct ring_buffer *rb = NULL;
 	struct config cfg = {0};
@@ -495,14 +487,12 @@ int main(int argc, char **argv)
 	int err, i;
 	int map_fd;
 	__u32 key = 0;
-
-	// For mass attachment
-	struct bpf_link **links = NULL;
-	int *fentry_fds = NULL;
-	int link_count = 0;
-	int total_funcs = 0;
 	bool test_attach = false;
 	struct timespec start, end;
+	
+	struct attach_state state = {0};
+	struct backend_ops *ops = NULL;
+	struct func_list fl = {0};
 
 	// Simple arg parsing
 	for (i = 1; i < argc; i++) {
@@ -565,7 +555,6 @@ int main(int argc, char **argv)
 	}
 
 	if (cfg.list_funcs) {
-		struct func_list fl = {0};
 		if (get_skb_funcs(&fl) < 0)
 			return 1;
 
@@ -582,8 +571,6 @@ int main(int argc, char **argv)
 	// Auto-detect backend if not specified
 	if (cfg.backend == BACKEND_AUTO) {
 		if (cfg.all_kprobes) {
-			// fentry requires strict argument matching. For mass attachment,
-			// kprobe is much more reliable.
 			cfg.backend = BACKEND_KPROBE;
 			printf("Backend: kprobe (forced for mass attachment)\n");
 		} else if (access("/sys/kernel/btf/vmlinux", F_OK) == 0) {
@@ -594,12 +581,14 @@ int main(int argc, char **argv)
 			printf("Backend: kprobe (vmlinux BTF not found)\n");
 		}
 	} else {
-		if (cfg.backend == BACKEND_KPROBE)
-			printf("Backend: kprobe\n");
-		else if (cfg.backend == BACKEND_FENTRY)
-			printf("Backend: fentry\n");
-		else
-			printf("Backend: kprobe-multi\n");
+		printf("Backend: %s\n", cfg.backend == BACKEND_FENTRY ? "fentry" : 
+		       (cfg.backend == BACKEND_KPROBE_MULTI ? "kprobe-multi" : "kprobe"));
+	}
+
+	ops = get_backend_ops(cfg.backend);
+	if (!ops) {
+		fprintf(stderr, "Internal Error: Invalid backend ops\n");
+		return 1;
 	}
 
 	printf("Loading kallsyms...\n");
@@ -620,29 +609,10 @@ int main(int argc, char **argv)
 		return 1;
 	}
 
-	// Find all programs
-	prog_kprobe = bpf_object__find_program_by_name(obj, "kprobe_ip_rcv");
-	prog_fentry = bpf_object__find_program_by_name(obj, "fentry_ip_rcv");
-	
-	char prog_name[32];
-	for (i = 0; i < MAX_ARGS_SUPPORTED; i++) {
-		snprintf(prog_name, sizeof(prog_name), "kprobe_multi_arg%d", i + 1);
-		prog_kprobe_multi[i] = bpf_object__find_program_by_name(obj, prog_name);
-	}
-
-	// Disable programs we don't need based on backend
-	if (cfg.backend == BACKEND_KPROBE) {
-		if (prog_fentry) bpf_program__set_autoload(prog_fentry, false);
-		for (i = 0; i < MAX_ARGS_SUPPORTED; i++) 
-			if (prog_kprobe_multi[i]) bpf_program__set_autoload(prog_kprobe_multi[i], false);
-	} else if (cfg.backend == BACKEND_FENTRY) {
-		if (prog_kprobe) bpf_program__set_autoload(prog_kprobe, false);
-		for (i = 0; i < MAX_ARGS_SUPPORTED; i++) 
-			if (prog_kprobe_multi[i]) bpf_program__set_autoload(prog_kprobe_multi[i], false);
-	} else if (cfg.backend == BACKEND_KPROBE_MULTI) {
-		if (prog_kprobe) bpf_program__set_autoload(prog_kprobe, false);
-		if (prog_fentry) bpf_program__set_autoload(prog_fentry, false);
-		// Keep kprobe_multi enabled
+	// Setup programs (autoload settings)
+	if (ops->setup(obj) < 0) {
+		fprintf(stderr, "ERROR: backend setup failed\n");
+		goto cleanup;
 	}
 
 	printf("Loading BPF object...\n");
@@ -672,119 +642,52 @@ int main(int argc, char **argv)
 		fprintf(stderr, "Warning: stack map not found\n");
 	}
 
-	printf("Attaching BPF programs...\n");
-	clock_gettime(CLOCK_MONOTONIC, &start);
-
+	// Prepare functions list
 	if (cfg.all_kprobes) {
-		struct func_list fl = {0};
 		printf("Scanning for skb functions...\n");
 		if (get_skb_funcs(&fl) < 0)
 			goto cleanup;
-
-		printf("Found %d functions. Attaching...\n", fl.count);
-		total_funcs = fl.count;
-
-		if (cfg.backend == BACKEND_KPROBE) {
-			links = calloc(fl.count, sizeof(struct bpf_link *));
-			for (i = 0; i < fl.count; i++) {
-				if (exiting) break;
-				links[i] = bpf_program__attach_kprobe(
-				    prog_kprobe, false, fl.names[i]);
-				if (libbpf_get_error(links[i])) {
-					links[i] = NULL;
-				} else {
-					link_count++;
-				}
-				free(fl.names[i]);
-			}
-		} else if (cfg.backend == BACKEND_FENTRY) {
-			fentry_fds = calloc(fl.count, sizeof(int));
-			int prog_fd = bpf_program__fd(prog_fentry);
-			for (i = 0; i < fl.count; i++) {
-				if (exiting) break;
-				LIBBPF_OPTS(bpf_link_create_opts, opts);
-				opts.target_btf_id = fl.ids[i];
-				int fd = bpf_link_create(
-				    prog_fd, 0, BPF_TRACE_FENTRY, &opts);
-				if (fd < 0) {
-					fentry_fds[i] = -1;
-				} else {
-					fentry_fds[i] = fd;
-					link_count++;
-				}
-				free(fl.names[i]);
-			}
-		} else if (cfg.backend == BACKEND_KPROBE_MULTI) {
-			// Group functions by argument index
-			struct func_list groups[MAX_ARGS_SUPPORTED] = {0};
-			for (i = 0; i < fl.count; i++) {
-				int idx = fl.arg_idxs[i] - 1;
-				if (idx >= 0 && idx < MAX_ARGS_SUPPORTED) {
-					add_func(&groups[idx], fl.names[i], fl.ids[i], fl.arg_idxs[i]);
-				}
-				free(fl.names[i]); // Free original name as we strdup'd in group
-			}
-
-			// Attach each group
-			for (i = 0; i < MAX_ARGS_SUPPORTED; i++) {
-				if (groups[i].count > 0 && prog_kprobe_multi[i]) {
-					LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
-					opts.syms = (const char **)groups[i].names;
-					opts.cnt = groups[i].count;
-					
-					multi_links[i] = bpf_program__attach_kprobe_multi_opts(
-						prog_kprobe_multi[i], NULL, &opts);
-					
-					if (libbpf_get_error(multi_links[i])) {
-						fprintf(stderr, "Failed to attach kprobe multi for arg %d: %ld\n", 
-							i+1, libbpf_get_error(multi_links[i]));
-						multi_links[i] = NULL;
-					} else {
-						link_count += groups[i].count;
-					}
-				}
-				// Cleanup group
-				for (int j = 0; j < groups[i].count; j++) {
-					free(groups[i].names[j]);
-				}
-				free(groups[i].names);
-				free(groups[i].ids);
-				free(groups[i].arg_idxs);
-			}
-		}
-
-		free(fl.names);
-		free(fl.ids);
-		free(fl.arg_idxs);
-		printf("Successfully attached to %d / %d functions.\n",
-		       link_count, fl.count);
-
+		printf("Found %d functions.\n", fl.count);
 	} else {
-		// Default: just attach to ip_rcv
-		if (cfg.backend == BACKEND_KPROBE)
-			link = bpf_program__attach(prog_kprobe);
-		else if (cfg.backend == BACKEND_FENTRY)
-			link = bpf_program__attach(prog_fentry);
-		else {
-			// Attach just for arg1 if kprobe-multi is selected without --all-kprobes
-			// Note: ip_rcv has skb as arg1
-			if (prog_kprobe_multi[0]) {
-				const char *func = "ip_rcv";
-				LIBBPF_OPTS(bpf_kprobe_multi_opts, opts);
-				opts.syms = &func;
-				opts.cnt = 1;
-				link = bpf_program__attach_kprobe_multi_opts(prog_kprobe_multi[0], NULL, &opts);
+		// Single attach to ip_rcv
+		// We need to resolve ID/ArgIdx for fentry/kprobe-multi
+		struct btf *btf = btf__load_vmlinux_btf();
+		__s32 id = 0;
+		__u8 arg_idx = 0;
+		
+		if (btf) {
+			__s32 skb_id = btf__find_by_name_kind(btf, "sk_buff", BTF_KIND_STRUCT);
+			__s32 func_id = btf__find_by_name_kind(btf, "ip_rcv", BTF_KIND_FUNC);
+			if (func_id > 0) {
+				id = func_id;
+				if (skb_id > 0) {
+					const struct btf_type *t = btf__type_by_id(btf, func_id);
+					arg_idx = get_skb_arg_idx(btf, t, skb_id);
+				}
 			}
+			btf__free(btf);
 		}
-
-		if (libbpf_get_error(link)) {
-			fprintf(stderr,
-				"ERROR: attaching program failed: %ld\n",
-				libbpf_get_error(link));
-			link = NULL;
-			goto cleanup;
-		}
+		
+		add_func(&fl, "ip_rcv", id, arg_idx);
 	}
+
+	printf("Attaching BPF programs...\n");
+	clock_gettime(CLOCK_MONOTONIC, &start);
+
+	if (ops->attach(obj, &fl, &state) < 0) {
+		fprintf(stderr, "ERROR: attach failed\n");
+		// continue to cleanup?
+	}
+	
+	// Free names (we already used them for attachment)
+	for (i = 0; i < fl.count; i++) {
+		free(fl.names[i]);
+	}
+	free(fl.names);
+	free(fl.ids);
+	free(fl.arg_idxs);
+
+	printf("Successfully attached to %d functions.\n", state.count);
 
 	clock_gettime(CLOCK_MONOTONIC, &end);
 	if (test_attach) {
@@ -829,24 +732,10 @@ cleanup:
 	clock_gettime(CLOCK_MONOTONIC, &start);
 	if (rb)
 		ring_buffer__free(rb);
-	if (link)
-		bpf_link__destroy(link);
-	if (links) {
-		for (i = 0; i < total_funcs; i++)
-			if (links[i])
-				bpf_link__destroy(links[i]);
-		free(links);
-	}
-	if (fentry_fds) {
-		for (i = 0; i < total_funcs; i++)
-			if (fentry_fds[i] > 0)
-				close(fentry_fds[i]);
-		free(fentry_fds);
-	}
-	for (i = 0; i < MAX_ARGS_SUPPORTED; i++) {
-		if (multi_links[i])
-			bpf_link__destroy(multi_links[i]);
-	}
+	
+	if (ops)
+		ops->detach(&state);
+
 	if (obj)
 		bpf_object__close(obj);
 

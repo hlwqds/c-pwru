@@ -22,7 +22,10 @@ LIBS := $(LIBBPF_OBJ) -lelf -lz
 BPF_SRC := $(SRC_DIR)/pwru.bpf.c
 BPF_OBJ := $(BUILD_DIR)/pwru.bpf.o
 
-USER_SRC := $(SRC_DIR)/pwru.c
+USER_SRC := $(SRC_DIR)/pwru.c \
+            $(SRC_DIR)/pwru_kprobe.c \
+            $(SRC_DIR)/pwru_fentry.c \
+            $(SRC_DIR)/pwru_kprobe_multi.c
 USER_BIN := $(BUILD_DIR)/pwru
 
 .PHONY: all clean libbpf_headers
