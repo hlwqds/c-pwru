@@ -16,6 +16,14 @@
 #define COMM_LEN 16
 #define PROG_NAME_LEN 32
 #define LINE_BUF_SIZE 256
+#define ARG_INDEX_OFFSET 1
+
+enum backend {
+	BACKEND_AUTO,
+	BACKEND_KPROBE,
+	BACKEND_FENTRY,
+	BACKEND_KPROBE_MULTI,
+};
 
 struct func_list {
 	char **names;

@@ -25,14 +25,14 @@ static pwru_err_t kprobe_multi_attach(struct bpf_object *obj, struct func_list *
 
 	// Group functions
 	for (i = 0; i < fl->count; i++) {
-		int idx = fl->arg_idxs[i] - 1;
+		int idx = fl->arg_idxs[i] - ARG_INDEX_OFFSET;
 		if (idx >= 0 && idx < MAX_ARGS_SUPPORTED) {
 			add_func(&groups[idx], fl->names[i], fl->ids[i], fl->arg_idxs[i]);
 		}
 	}
 
 	for (i = 0; i < MAX_ARGS_SUPPORTED; i++) {
-		snprintf(prog_name, sizeof(prog_name), "kprobe_multi_arg%d", i + 1);
+		snprintf(prog_name, sizeof(prog_name), "kprobe_multi_arg%d", i + ARG_INDEX_OFFSET);
 		prog = bpf_object__find_program_by_name(obj, prog_name);
 		
 		if (groups[i].count > 0 && prog) {

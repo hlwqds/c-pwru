@@ -14,7 +14,7 @@ static pwru_err_t fentry_setup(struct bpf_object *obj)
 	if (p) bpf_program__set_autoload(p, false);
 
 	for (i = 0; i < MAX_ARGS_SUPPORTED; i++) {
-		snprintf(name, sizeof(name), "kprobe_multi_arg%d", i + 1);
+		snprintf(name, sizeof(name), "kprobe_multi_arg%d", i + ARG_INDEX_OFFSET);
 		p = bpf_object__find_program_by_name(obj, name);
 		if (p) bpf_program__set_autoload(p, false);
 	}
