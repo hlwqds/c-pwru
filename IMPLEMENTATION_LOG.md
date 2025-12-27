@@ -92,7 +92,7 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 *   [x] **第四.五阶段**：Kprobe 白名单过滤（优化启动速度）。
 *   [x] **第五阶段**：堆栈追踪、符号解析、L4/PID 过滤。
 *   [x] **第六阶段**：性能优化 (fentry)。
-*   [ ] **第七阶段**：高级大规模挂载 (kprobe_multi & groups)。
+*   [x] **第七阶段**：高级大规模挂载 (kprobe_multi & groups)。
 
 ## 第六阶段：性能优化 (fentry)（已完成）
 
@@ -124,23 +124,31 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 
 -   **资源管理**：实现了针对 `fentry` 文件描述符 (FD) 的独立管理与清理逻辑。
 
-## 第七阶段：高级大规模挂载 (kprobe_multi)（计划中）
+## 第七阶段：高级大规模挂载 (kprobe_multi)（已完成）
 
-为了进一步解决传统 kprobe 启动慢（在大规模模式下）以及 fentry 签名匹配严格的问题，计划引入 **Kprobe Multi (KPM)**。
+为了进一步解决传统 kprobe 启动慢（在大规模模式下）以及 fentry 签名匹配严格的问题，引入了 **Kprobe Multi (KPM)**。
 
 ### 目标
 实现类似于原版 `pwru` 的分组挂载策略，利用 Linux 5.17+ 的 `BPF_TRACE_KPROBE_MULTI` 特性，实现毫秒级的千点挂载。
 
-### 实现计划
+### 实现细节
 1.  **参数分组 (Kprobe Groups)**：
-    *   利用 BTF 扫描所有内核函数。
+    *   利用 BTF 扫描所有内核函数，并解析 `sk_buff *` 参数的位置。
     *   根据 `struct sk_buff *` 参数出现的位置（第1、2、3、4或5个参数）将函数分为 5 个组。
 2.  **多入口 BPF 程序**：
-    *   在 `pwru.bpf.c` 中生成 5 个不同的 BPF 程序入口（例如 `kprobe_multi_arg1`, `kprobe_multi_arg2`...）。
-    *   每个程序专门负责从特定的寄存器/参数位置读取 `skb`。
-3.  **批量挂载**：
+    *   在 `pwru.bpf.c` 中生成 5 个不同的 BPF 程序入口（`kprobe_multi_arg1` ... `kprobe_multi_arg5`）。
+    *   每个程序使用 `PT_REGS_PARMx` 宏从特定的寄存器位置读取 `skb`。
+### 3. 批量挂载：
     *   使用 `libbpf` 的 `bpf_program__attach_kprobe_multi_opts` 接口。
-    *   一次系统调用即可为一个组内的数百个函数完成挂载。
+    *   一次系统调用即可为一个组内的数百个函数完成挂载，极大提升了启动速度。
+
+### 实测性能对比 (1739 个内核函数)
+
+| 操作 | Kprobe Multi (新架构) | Legacy Kprobe (旧架构) | 提升倍数 |
+| :--- | :--- | :--- | :--- |
+| **挂载 (Attach)** | **0.53 秒** | 5.78 秒 | **~10x** |
+| **清理 (Cleanup)** | **0.018 秒** | 132.50 秒 | **~7360x** |
+| **原理差异** | 5 次系统调用 (bpf_link) | 1739 次系统调用 (perf_event) | RCU 同步开销 |
 
 ## 当前状态
 
@@ -162,6 +170,8 @@ int BPF_KPROBE(ip_rcv, struct sk_buff *skb) {
 
 *   [x] **第六阶段**：性能优化 (fentry)。
 
+*   [x] **第七阶段**：高级大规模挂载 (kprobe_multi & groups)。
+
 
 
 ## 如何运行
@@ -176,10 +186,33 @@ make
 
 sudo ./build/pwru --proto tcp --dport 80
 
-
-
 # 强制使用 kprobe
 
 sudo ./build/pwru --backend kprobe --dst-ip 1.1.1.1
 
+# 强制使用 kprobe-multi (如果内核 >= 5.17)
+sudo ./build/pwru --backend kprobe-multi --all-kprobes --dst-ip 1.1.1.1
+
 ```
+
+## 未来路线图 (Roadmap)
+
+### 第八阶段：内核级 PCAP 过滤器注入 (PCAP Filter)
+- **目标**：支持 `tcpdump` 风格的过滤表达式。
+- **技术**：集成 `libpcap` 将表达式编译为 cBPF，并在 eBPF 中实现解释器或动态指令替换。
+
+### 第九阶段：动态 SKB 数据导出 (SKB Output)
+- **目标**：查看数据包原始载荷。
+- **技术**：读取 `skb->data` 线性区，通过 RingBuffer 发送原始字节并在用户态进行 HexDump。
+
+### 第十阶段：全生命周期追踪 (Packet Lifetime Tracking)
+- **目标**：跨 NAT、隧道、Bridge 追踪。
+- **技术**：追踪 `skb_clone`、`skb_copy` 等操作，维持数据包的关联上下文。
+
+### 第十一阶段：动态字段读取 (Runtime BTF Parsing)
+- **目标**：支持查看任意内核结构字段。
+- **技术**：用户态解析 BTF 获取字段偏移量，动态通知内核态进行读取。
+
+### 第十二阶段：追踪其他 BPF 程序 (Tracing TC/XDP)
+- **目标**：分析其他 eBPF 程序对数据包的处理。
+- **技术**：利用 `fentry`/`fexit` 挂载到其他 BPF 程序的入口和出口。

@@ -193,3 +193,38 @@ int BPF_PROG(fentry_ip_rcv, struct sk_buff *skb)
 {
 	return handle_packet(ctx, skb, bpf_get_func_ip(ctx));
 }
+
+SEC("kprobe.multi/arg1")
+int kprobe_multi_arg1(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM1(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
+
+SEC("kprobe.multi/arg2")
+int kprobe_multi_arg2(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM2(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
+
+SEC("kprobe.multi/arg3")
+int kprobe_multi_arg3(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM3(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
+
+SEC("kprobe.multi/arg4")
+int kprobe_multi_arg4(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM4(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
+
+SEC("kprobe.multi/arg5")
+int kprobe_multi_arg5(struct pt_regs *ctx)
+{
+	struct sk_buff *skb = (struct sk_buff *)PT_REGS_PARM5(ctx);
+	return handle_packet(ctx, skb, PT_REGS_IP(ctx));
+}
